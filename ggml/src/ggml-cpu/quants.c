@@ -1,5 +1,6 @@
 #define GGML_COMMON_IMPL_C
 #include "ggml-common.h"
+#include "ggml-common-turbo.h"
 
 #include "ggml-cpu-impl.h"
 #include "simd-mappings.h"
@@ -1270,6 +1271,53 @@ void ggml_vec_dot_iq4_xs_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs,
 }
 
 // ============================ 4-bit non-linear quants
+
+// ====================== TurboQuant vec_dot (dequantize-based, QK_TURBO=128, Q8_K=256)
+// Each Q8_K block (256 elements) corresponds to 2 turbo blocks (128 elements each).
+// We dequantize each turbo block to float, then accumulate dot product with Q8_K qs.
+
+#define TURBO_VEC_DOT_IMPL(NAME, BLOCK_TYPE, DEQUANT_FN) \
+void NAME(int n, float * GGML_RESTRICT s, size_t bs, \
+        const void * GGML_RESTRICT vx, size_t bx, \
+        const void * GGML_RESTRICT vy, size_t by, int nrc) { \
+    assert(nrc == 1); \
+    UNUSED(nrc); UNUSED(bx); UNUSED(by); UNUSED(bs); \
+    \
+    assert(n % QK_K == 0); \
+    const int nb = n / QK_K; \
+    \
+    const BLOCK_TYPE  * GGML_RESTRICT x = (const BLOCK_TYPE *)vx; \
+    const block_q8_K  * GGML_RESTRICT y = (const block_q8_K *)vy; \
+    \
+    float sumf = 0.0f; \
+    \
+    for (int i = 0; i < nb; i++) { \
+        float tmp[QK_K]; \
+        /* dequantize 2 turbo blocks (each QK_TURBO=128) into tmp[256] */ \
+        DEQUANT_FN(&x[2*i],     tmp,             QK_TURBO); \
+        DEQUANT_FN(&x[2*i + 1], tmp + QK_TURBO,  QK_TURBO); \
+        \
+        const float d = y[i].d; \
+        float sum = 0.0f; \
+        for (int j = 0; j < QK_K; j++) { \
+            sum += tmp[j] * (float)y[i].qs[j]; \
+        } \
+        sumf += sum * d; \
+    } \
+    \
+    *s = sumf; \
+}
+
+TURBO_VEC_DOT_IMPL(ggml_vec_dot_turbo2_0_q8_K,  block_turbo2_0,  dequantize_row_turbo2_0)
+TURBO_VEC_DOT_IMPL(ggml_vec_dot_turbo2h_0_q8_K, block_turbo2h_0, dequantize_row_turbo2h_0)
+TURBO_VEC_DOT_IMPL(ggml_vec_dot_turbo3_0_q8_K,  block_turbo3_0,  dequantize_row_turbo3_0)
+TURBO_VEC_DOT_IMPL(ggml_vec_dot_turbo3h_0_q8_K, block_turbo3h_0, dequantize_row_turbo3h_0)
+TURBO_VEC_DOT_IMPL(ggml_vec_dot_turbo4_0_q8_K,  block_turbo4_0,  dequantize_row_turbo4_0)
+TURBO_VEC_DOT_IMPL(ggml_vec_dot_turbop3_0_q8_K, block_turbop3_0, dequantize_row_turbop3_0)
+TURBO_VEC_DOT_IMPL(ggml_vec_dot_turbop4_0_q8_K, block_turbop4_0, dequantize_row_turbop4_0)
+TURBO_VEC_DOT_IMPL(ggml_vec_dot_turbop5_0_q8_K, block_turbop5_0, dequantize_row_turbop5_0)
+
+#undef TURBO_VEC_DOT_IMPL
 
 void quantize_row_iq4_nl(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     assert(k % QK4_NL == 0);

@@ -429,7 +429,17 @@ extern "C" {
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
-        GGML_TYPE_COUNT   = 42,
+        // TurboQuant MSE (Algorithm 1)
+        GGML_TYPE_TURBO2_0  = 42,  // 2-bit MSE
+        GGML_TYPE_TURBO2H_0 = 43,  // 2.5-bit fractional
+        GGML_TYPE_TURBO3_0  = 44,  // 3-bit MSE
+        GGML_TYPE_TURBO3H_0 = 45,  // 3.5-bit fractional
+        GGML_TYPE_TURBO4_0  = 46,  // 4-bit MSE
+        // TurboQuant prod (Algorithm 2: MSE + QJL)
+        GGML_TYPE_TURBOP3_0 = 47,  // 3-bit prod (2-bit MSE + 1-bit QJL)
+        GGML_TYPE_TURBOP4_0 = 48,  // 4-bit prod (3-bit MSE + 1-bit QJL)
+        GGML_TYPE_TURBOP5_0 = 49,  // 5-bit prod (4-bit MSE + 1-bit QJL)
+        GGML_TYPE_COUNT   = 50,
     };
 
     // precision

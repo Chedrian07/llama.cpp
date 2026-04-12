@@ -3,6 +3,7 @@
 #include "common.cuh"
 #include "convert.cuh"
 #include "vecdotq.cuh"
+#include "turbo-common.cuh"
 
 #include <cstdint>
 
@@ -577,6 +578,265 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
     }
 }
 
+// ==================== TurboQuant flash attention helpers ====================
+
+// vec_dot_KQ for TurboQuant types: cooperative warp dequantize + per-thread partial dot.
+//
+// Optimization: the 32 threads in a warp all call this function on the SAME block
+// (nthreads == WARP_SIZE path in fattn-vec). Previously each thread dequantized the
+// entire 128-element block redundantly (32x wasted work including 32x full FWHT).
+// Now the warp cooperatively dequantizes into shared memory once, then each thread
+// reads its 4 elements from shared memory for the dot product.
+//
+// Shared memory usage (per kernel): nwarps_max * 128 * sizeof(float) = 2 KB for 4 warps.
+// Indexed by threadIdx.y (warp id within block) so concurrent warps have independent buffers.
+template <ggml_type turbo_type, int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+
+    GGML_UNUSED(Q_v);
+
+    // Max warps per fattn-vec kernel block. fattn-vec uses nthreads=128 => 4 warps.
+    // Oversized constant is harmless; scoped to this template instantiation.
+    constexpr int TURBO_KQ_NWARPS = 8;
+    __shared__ float K_f_shared[TURBO_KQ_NWARPS][TURBO_DIM_CUDA];
+
+    const int warp_id = threadIdx.y;
+    const int lane    = threadIdx.x & (WARP_SIZE - 1);
+
+    float * K_f = K_f_shared[warp_id];
+
+    if constexpr (nthreads == WARP_SIZE) {
+        // Cooperative path: the 32 threads of this warp cooperatively dequantize
+        // the block into shared memory. Each lane unpacks and writes 4 elements.
+        cooperative_dequantize_block<turbo_type>(K_c, K_f, lane);
+        // __syncwarp() is performed at the end of cooperative_inverse_rotate.
+    } else {
+        // Fallback: single thread per warp-lane dequantizes redundantly.
+        // (Not used by fattn-vec for D=128 but kept for safety.)
+        if (lane == 0) {
+            turbo_dequantize_block<turbo_type>(K_c, K_f);
+        }
+        __syncwarp();
+    }
+
+    // Compute dot product with q8_1-quantized Q
+    // Q_q8 contains int8x4 packed values, Q_ds contains (scale, sum) per QK8_1 group
+    float sum = 0.0f;
+
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
+        const int k_KQ = k_KQ_0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads);
+
+        // Get 4 consecutive dequantized K values
+        const int base = k_KQ * 4;
+        if (base + 3 < D) {
+            const int u = Q_q8[k_KQ_0/nthreads];
+            const int8_t * u8 = (const int8_t *)&u;
+            const float2 Q_ds_val = ((const float2 *) Q_ds_v)[k_KQ_0/nthreads];
+
+            float dot = 0.0f;
+            dot += K_f[base + 0] * (float)u8[0];
+            dot += K_f[base + 1] * (float)u8[1];
+            dot += K_f[base + 2] * (float)u8[2];
+            dot += K_f[base + 3] * (float)u8[3];
+
+            sum += dot * Q_ds_val.x;
+        }
+    }
+
+    return sum;
+}
+
+// vec_dot_KQ for TurboQuant prod (Algorithm 2) types.
+//
+// Same MSE-based dot as vec_dot_fattn_vec_KQ_turbo, plus a QJL inner-product
+// correction term derived from the 1-bit residual signs stored in the block.
+//
+// The QJL correction (in the original basis, with q in original basis) is:
+//   correction = (||k|| * ||r|| / sqrt(D)) * <q, R^-1(sign_vec)>
+// where sign_vec[i] = proj_sign_i * (2*qjl_bit_i - 1) and R is the
+// FWHT-then-sign-flip rotation. We compute R^-1(sign_vec) cooperatively into a
+// second shared memory buffer and accumulate a second per-thread partial dot
+// in the same loop as the MSE part.
+//
+// Shared memory usage: 2 buffers x nwarps x 128 floats = 4 KB for 4 warps,
+// up from 2 KB for the MSE-only turbo path.
+template <ggml_type turbo_type, int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbop(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+
+    GGML_UNUSED(Q_v);
+
+    constexpr int TURBO_KQ_NWARPS = 8;
+    __shared__ float K_f_shared  [TURBO_KQ_NWARPS][TURBO_DIM_CUDA];
+    __shared__ float K_qjl_shared[TURBO_KQ_NWARPS][TURBO_DIM_CUDA];
+
+    const int warp_id = threadIdx.y;
+    const int lane    = threadIdx.x & (WARP_SIZE - 1);
+
+    float * K_f   = K_f_shared  [warp_id];
+    float * K_qjl = K_qjl_shared[warp_id];
+
+    // Read .qjl, .r_norm, .norm directly from the typed prod block.
+    // These three fields share the same offsets across turbop3/4/5 except for
+    // .qjl, which sits after a type-specific qs[] payload, so we dispatch
+    // explicitly via if constexpr.
+    const uint8_t * blk_qjl = nullptr;
+    float           blk_norm   = 0.0f;
+    float           blk_r_norm = 0.0f;
+    if constexpr (turbo_type == GGML_TYPE_TURBOP3_0) {
+        const block_turbop3_0 * b = (const block_turbop3_0 *) K_c;
+        blk_qjl    = b->qjl;
+        blk_norm   = b->norm;
+        blk_r_norm = b->r_norm;
+    } else if constexpr (turbo_type == GGML_TYPE_TURBOP4_0) {
+        const block_turbop4_0 * b = (const block_turbop4_0 *) K_c;
+        blk_qjl    = b->qjl;
+        blk_norm   = b->norm;
+        blk_r_norm = b->r_norm;
+    } else if constexpr (turbo_type == GGML_TYPE_TURBOP5_0) {
+        const block_turbop5_0 * b = (const block_turbop5_0 *) K_c;
+        blk_qjl    = b->qjl;
+        blk_norm   = b->norm;
+        blk_r_norm = b->r_norm;
+    } else {
+        static_assert(turbo_type == GGML_TYPE_TURBOP3_0 ||
+                      turbo_type == GGML_TYPE_TURBOP4_0 ||
+                      turbo_type == GGML_TYPE_TURBOP5_0,
+                      "vec_dot_fattn_vec_KQ_turbop only supports prod turbo types");
+    }
+
+    if constexpr (nthreads == WARP_SIZE) {
+        // 1. MSE part: cooperatively dequantize the centroid indices into K_f
+        //    (same as the MSE-only turbo path; ignores qjl/r_norm).
+        cooperative_dequantize_block<turbo_type>(K_c, K_f, lane);
+
+        // 2. QJL part: cooperatively compute R^-1(sign_vec) into K_qjl.
+        cooperative_qjl_signs_to_orig(blk_qjl, K_qjl, lane);
+    } else {
+        // Fallback: single-thread MSE only (no QJL correction). Not used by
+        // fattn-vec for D=128 (always nthreads == WARP_SIZE), but kept so the
+        // template still type-checks for hypothetical other instantiations.
+        if (lane == 0) {
+            turbo_dequantize_block<turbo_type>(K_c, K_f);
+            // Zero the entire QJL buffer; correction term will be 0.
+            #pragma unroll
+            for (int j = 0; j < TURBO_DIM_CUDA; ++j) {
+                K_qjl[j] = 0.0f;
+            }
+        }
+        __syncwarp();
+    }
+
+    // Per-thread partial dots: MSE and QJL.
+    float sum_mse = 0.0f;
+    float sum_qjl = 0.0f;
+
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
+        const int k_KQ = k_KQ_0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads);
+
+        const int base = k_KQ * 4;
+        if (base + 3 < D) {
+            const int u = Q_q8[k_KQ_0/nthreads];
+            const int8_t * u8 = (const int8_t *)&u;
+            const float2 Q_ds_val = ((const float2 *) Q_ds_v)[k_KQ_0/nthreads];
+
+            float dot_mse = 0.0f;
+            float dot_qjl = 0.0f;
+            dot_mse += K_f  [base + 0] * (float)u8[0];
+            dot_mse += K_f  [base + 1] * (float)u8[1];
+            dot_mse += K_f  [base + 2] * (float)u8[2];
+            dot_mse += K_f  [base + 3] * (float)u8[3];
+            dot_qjl += K_qjl[base + 0] * (float)u8[0];
+            dot_qjl += K_qjl[base + 1] * (float)u8[1];
+            dot_qjl += K_qjl[base + 2] * (float)u8[2];
+            dot_qjl += K_qjl[base + 3] * (float)u8[3];
+
+            sum_mse += dot_mse * Q_ds_val.x;
+            sum_qjl += dot_qjl * Q_ds_val.x;
+        }
+    }
+
+    // Combine: sum_mse already includes the K-side ||k|| via the inverse
+    // rotation. The QJL contribution still needs the (||k|| * ||r|| / sqrt(D))
+    // scale factor applied here. D should always be TURBO_DIM_CUDA = 128 for
+    // turbo types (the underlying block is 128 elements), so use rsqrtf for
+    // the rare case where the template gets instantiated for a different D.
+    const float qjl_scale = blk_norm * blk_r_norm * rsqrtf((float)D);
+    return sum_mse + qjl_scale * sum_qjl;
+}
+
+// Compile-time TurboQuant block size
+template <ggml_type type>
+static constexpr __device__ __host__ size_t turbo_block_size() {
+    if constexpr (type == GGML_TYPE_TURBO2_0)  return sizeof(block_turbo2_0);
+    if constexpr (type == GGML_TYPE_TURBO2H_0) return sizeof(block_turbo2h_0);
+    if constexpr (type == GGML_TYPE_TURBO3_0)  return sizeof(block_turbo3_0);
+    if constexpr (type == GGML_TYPE_TURBO3H_0) return sizeof(block_turbo3h_0);
+    if constexpr (type == GGML_TYPE_TURBO4_0)  return sizeof(block_turbo4_0);
+    if constexpr (type == GGML_TYPE_TURBOP3_0) return sizeof(block_turbop3_0);
+    if constexpr (type == GGML_TYPE_TURBOP4_0) return sizeof(block_turbop4_0);
+    if constexpr (type == GGML_TYPE_TURBOP5_0) return sizeof(block_turbop5_0);
+    return 0;
+}
+
+// dequantize_V for TurboQuant types: cooperative warp dequantize into shared memory,
+// then each thread copies the requested ne elements.
+//
+// The 32 threads of a warp all call this with the same block pointer but different `i0`
+// offsets (each thread handles a different slice of the 128-element block). The block
+// must be dequantized ONCE per warp and then each thread reads its slice.
+//
+// We use a first-call caching trick: the cooperative dequantize is unconditional (idempotent),
+// but since fattn-vec keeps the same block for the whole loop iteration, the shared buffer
+// acts as a per-call scratchpad. For the V path, each lane reads V_rows_per_thread=4 contiguous
+// floats from shared memory.
+template <ggml_type turbo_type, typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_turbo(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
+    // TurboQuant block size is 128 = QK_TURBO, one block per head
+    // i0 is the element index within the row
+
+    constexpr int TURBO_V_NWARPS = 8;
+    __shared__ float V_f_shared[TURBO_V_NWARPS][TURBO_DIM_CUDA];
+
+    const int warp_id = threadIdx.y;
+    const int lane    = threadIdx.x & (WARP_SIZE - 1);
+    float * K_f = V_f_shared[warp_id];
+
+    // Determine which block i0 falls into (should always be block 0 for D=128)
+    const int64_t ib = i0 / TURBO_DIM_CUDA;
+    const int     i_within = (int)(i0 % TURBO_DIM_CUDA);
+
+    // Get pointer to the block
+    constexpr size_t block_size = turbo_block_size<turbo_type>();
+    const char * blk = (const char *)vx + ib * block_size;
+
+    // Cooperative warp dequantize: all 32 lanes of this warp participate, writing
+    // into the per-warp shared buffer. (Same block pointer across lanes.)
+    cooperative_dequantize_block<turbo_type>(blk, K_f, lane);
+    // __syncwarp() is issued at the end of cooperative_inverse_rotate inside the helper.
+
+    // Extract the requested ne elements starting at i_within
+#ifdef FP16_AVAILABLE
+    if constexpr (std::is_same_v<T, half>) {
+#pragma unroll
+        for (int l0 = 0; l0 < ne; l0 += 2) {
+            ((half2 *) dst)[l0/2] = make_half2(__float2half(K_f[i_within + l0]), __float2half(K_f[i_within + l0 + 1]));
+        }
+    } else
+#endif // FP16_AVAILABLE
+    if constexpr (std::is_same_v<T, float>) {
+#pragma unroll
+        for (int l = 0; l < ne; ++l) {
+            ((float *) dst)[l] = K_f[i_within + l];
+        }
+    } else {
+        static_assert(std::is_same_v<T, void>, "unsupported type");
+    }
+}
+
 template <ggml_type type_K, int D, int nthreads>
 constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
     if constexpr (type_K == GGML_TYPE_F16) {
@@ -593,6 +853,22 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
         return vec_dot_fattn_vec_KQ_q8_0<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_BF16) {
         return vec_dot_fattn_vec_KQ_bf16<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TURBO2_0) {
+        return vec_dot_fattn_vec_KQ_turbo<GGML_TYPE_TURBO2_0, D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TURBO2H_0) {
+        return vec_dot_fattn_vec_KQ_turbo<GGML_TYPE_TURBO2H_0, D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TURBO3_0) {
+        return vec_dot_fattn_vec_KQ_turbo<GGML_TYPE_TURBO3_0, D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TURBO3H_0) {
+        return vec_dot_fattn_vec_KQ_turbo<GGML_TYPE_TURBO3H_0, D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TURBO4_0) {
+        return vec_dot_fattn_vec_KQ_turbo<GGML_TYPE_TURBO4_0, D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TURBOP3_0) {
+        return vec_dot_fattn_vec_KQ_turbop<GGML_TYPE_TURBOP3_0, D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TURBOP4_0) {
+        return vec_dot_fattn_vec_KQ_turbop<GGML_TYPE_TURBOP4_0, D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TURBOP5_0) {
+        return vec_dot_fattn_vec_KQ_turbop<GGML_TYPE_TURBOP5_0, D, nthreads>;
     } else {
         static_assert(type_K == -1, "bad type");
         return nullptr;
@@ -615,6 +891,22 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
         return dequantize_V_q8_0<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_BF16) {
         return dequantize_V_bf16<float, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TURBO2_0) {
+        return dequantize_V_turbo<GGML_TYPE_TURBO2_0, T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TURBO2H_0) {
+        return dequantize_V_turbo<GGML_TYPE_TURBO2H_0, T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TURBO3_0) {
+        return dequantize_V_turbo<GGML_TYPE_TURBO3_0, T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TURBO3H_0) {
+        return dequantize_V_turbo<GGML_TYPE_TURBO3H_0, T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TURBO4_0) {
+        return dequantize_V_turbo<GGML_TYPE_TURBO4_0, T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TURBOP3_0) {
+        return dequantize_V_turbo<GGML_TYPE_TURBOP3_0, T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TURBOP4_0) {
+        return dequantize_V_turbo<GGML_TYPE_TURBOP4_0, T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TURBOP5_0) {
+        return dequantize_V_turbo<GGML_TYPE_TURBOP5_0, T, ne>;
     } else {
         static_assert(type_V == -1, "bad type");
         return nullptr;

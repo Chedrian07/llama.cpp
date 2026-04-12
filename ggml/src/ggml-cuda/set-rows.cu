@@ -309,6 +309,86 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             nb1, nb2, nb3,
             stream
         );
+    } else if (dst->type == GGML_TYPE_TURBO2_0) {
+        set_rows_cuda_quant<idx_t, block_turbo2_0, QK_TURBO, quantize_f32_turbo2_0_block>(
+            src0_d, src1_d, (block_turbo2_0*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_TURBO2H_0) {
+        set_rows_cuda_quant<idx_t, block_turbo2h_0, QK_TURBO, quantize_f32_turbo2h_0_block>(
+            src0_d, src1_d, (block_turbo2h_0*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_TURBO3_0) {
+        set_rows_cuda_quant<idx_t, block_turbo3_0, QK_TURBO, quantize_f32_turbo3_0_block>(
+            src0_d, src1_d, (block_turbo3_0*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_TURBO3H_0) {
+        set_rows_cuda_quant<idx_t, block_turbo3h_0, QK_TURBO, quantize_f32_turbo3h_0_block>(
+            src0_d, src1_d, (block_turbo3h_0*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_TURBO4_0) {
+        set_rows_cuda_quant<idx_t, block_turbo4_0, QK_TURBO, quantize_f32_turbo4_0_block>(
+            src0_d, src1_d, (block_turbo4_0*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_TURBOP3_0) {
+        set_rows_cuda_quant<idx_t, block_turbop3_0, QK_TURBO, quantize_f32_turbop3_0_block>(
+            src0_d, src1_d, (block_turbop3_0*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_TURBOP4_0) {
+        set_rows_cuda_quant<idx_t, block_turbop4_0, QK_TURBO, quantize_f32_turbop4_0_block>(
+            src0_d, src1_d, (block_turbop4_0*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_TURBOP5_0) {
+        set_rows_cuda_quant<idx_t, block_turbop5_0, QK_TURBO, quantize_f32_turbop5_0_block>(
+            src0_d, src1_d, (block_turbop5_0*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
     } else {
         GGML_ABORT("unsupported type %s", ggml_type_name(dst->type));
     }

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cinttypes>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -1123,6 +1124,243 @@ ggml_type llama_kv_cache::type_k() const {
 
 ggml_type llama_kv_cache::type_v() const {
     return layers[0].v->type;
+}
+
+int32_t llama_kv_cache::dbg_get_model_layer_id(int32_t ikv) const {
+    if (ikv < 0 || (size_t) ikv >= layers.size()) {
+        return -1;
+    }
+    return (int32_t) layers[ikv].il;
+}
+
+uint32_t llama_kv_cache::dbg_get_n_layers() const {
+    return (uint32_t) layers.size();
+}
+
+bool llama_kv_cache::dbg_get_v_trans() const {
+    return v_trans;
+}
+
+bool llama_kv_cache::dbg_get_attn_rot_k() const {
+    return attn_rot_k;
+}
+
+bool llama_kv_cache::dbg_get_attn_rot_v() const {
+    return attn_rot_v;
+}
+
+int32_t llama_kv_cache::dbg_get_k_rot_dim() const {
+    if (!attn_rot_k || n_embd_head_k_all <= 0) {
+        return 0;
+    }
+    // Mirror the logic in build_input_k_rot
+    int nrot = 64;
+    while (n_embd_head_k_all % (nrot * 2) == 0) {
+        nrot *= 2;
+    }
+    return nrot;
+}
+
+int32_t llama_kv_cache::dbg_get_v_rot_dim() const {
+    if (!attn_rot_v || n_embd_head_v_all <= 0) {
+        return 0;
+    }
+    // Mirror the logic in build_input_v_rot (currently always 64)
+    return 64;
+}
+
+size_t llama_kv_cache::dbg_dump_k_layer_f32(
+        int32_t il, uint32_t n_tokens, uint32_t stream_id,
+        float * out_f32, size_t out_capacity_floats) const {
+    auto it = map_layer_ids.find(il);
+    if (it == map_layer_ids.end()) {
+        LLAMA_LOG_ERROR("%s: model layer %d has no KV cache entry\n", __func__, il);
+        return 0;
+    }
+
+    const int32_t ikv = it->second;
+    const auto &  layer = layers[ikv];
+
+    ggml_tensor * k = layer.k;
+    if (!k) {
+        LLAMA_LOG_ERROR("%s: layer %d has no K tensor\n", __func__, il);
+        return 0;
+    }
+
+    if (stream_id >= n_stream) {
+        LLAMA_LOG_ERROR("%s: stream_id %u out of range (n_stream=%u)\n", __func__, stream_id, n_stream);
+        return 0;
+    }
+
+    const uint64_t n_embd_k_gqa = k->ne[0];
+    const uint64_t kv_size      = k->ne[1];
+
+    if (n_tokens > kv_size) {
+        LLAMA_LOG_ERROR("%s: requested n_tokens=%u > kv_size=%" PRIu64 "\n", __func__, n_tokens, kv_size);
+        return 0;
+    }
+
+    const size_t n_floats_needed = (size_t) n_tokens * (size_t) n_embd_k_gqa;
+    if (n_floats_needed > out_capacity_floats) {
+        LLAMA_LOG_ERROR("%s: out buffer too small: need %zu floats, have %zu\n",
+                        __func__, n_floats_needed, out_capacity_floats);
+        return 0;
+    }
+
+    // Memory layout in the cache: tensor shape is [n_embd_k_gqa, kv_size, n_stream]
+    // Each "row" is one token's worth of K data (n_embd_k_gqa entries).
+    // We want the first n_tokens rows from stream stream_id.
+    const size_t row_bytes = ggml_row_size(k->type, n_embd_k_gqa);
+    const size_t stream_offset_bytes = (size_t) stream_id * (size_t) kv_size * row_bytes;
+    const size_t total_bytes = (size_t) n_tokens * row_bytes;
+
+    std::vector<uint8_t> tmp(total_bytes);
+    ggml_backend_tensor_get(k, tmp.data(), stream_offset_bytes, total_bytes);
+
+    if (k->type == GGML_TYPE_F32) {
+        std::memcpy(out_f32, tmp.data(), total_bytes);
+    } else {
+        const auto * traits = ggml_get_type_traits(k->type);
+        if (!traits || !traits->to_float) {
+            LLAMA_LOG_ERROR("%s: no to_float for K type %s\n", __func__, ggml_type_name(k->type));
+            return 0;
+        }
+
+        // The source layout is contiguous rows of n_embd_k_gqa elements.
+        // For block-quantized types we must dequantize row-by-row using
+        // ggml_row_size to know the bytes per row.
+        for (uint32_t t = 0; t < n_tokens; ++t) {
+            const uint8_t * src = tmp.data() + (size_t) t * row_bytes;
+            float         * dst = out_f32 + (size_t) t * n_embd_k_gqa;
+            traits->to_float(src, dst, (int64_t) n_embd_k_gqa);
+        }
+    }
+
+    return n_floats_needed;
+}
+
+size_t llama_kv_cache::dbg_dump_v_layer_f32(
+        int32_t il, uint32_t n_tokens, uint32_t stream_id,
+        float * out_f32, size_t out_capacity_floats) const {
+    auto it = map_layer_ids.find(il);
+    if (it == map_layer_ids.end()) {
+        LLAMA_LOG_ERROR("%s: model layer %d has no KV cache entry\n", __func__, il);
+        return 0;
+    }
+
+    const int32_t ikv = it->second;
+    const auto &  layer = layers[ikv];
+
+    ggml_tensor * v = layer.v;
+    if (!v) {
+        LLAMA_LOG_ERROR("%s: layer %d has no V tensor (MLA model?)\n", __func__, il);
+        return 0;
+    }
+
+    if (stream_id >= n_stream) {
+        LLAMA_LOG_ERROR("%s: stream_id %u out of range (n_stream=%u)\n", __func__, stream_id, n_stream);
+        return 0;
+    }
+
+    const uint64_t n_embd_v_gqa = v_trans ? v->ne[1] : v->ne[0];
+    const uint64_t kv_size      = v_trans ? v->ne[0] : v->ne[1];
+
+    if (n_tokens > kv_size) {
+        LLAMA_LOG_ERROR("%s: requested n_tokens=%u > kv_size=%" PRIu64 "\n", __func__, n_tokens, kv_size);
+        return 0;
+    }
+
+    const size_t n_floats_needed = (size_t) n_tokens * (size_t) n_embd_v_gqa;
+    if (n_floats_needed > out_capacity_floats) {
+        LLAMA_LOG_ERROR("%s: out buffer too small: need %zu floats, have %zu\n",
+                        __func__, n_floats_needed, out_capacity_floats);
+        return 0;
+    }
+
+    if (!v_trans) {
+        // Non-transposed: tensor shape [n_embd_v_gqa, kv_size, n_stream].
+        // Each "row" is one token's worth of V data (n_embd_v_gqa entries).
+        // This matches the K layout.
+        const size_t row_bytes = ggml_row_size(v->type, n_embd_v_gqa);
+        const size_t stream_offset_bytes = (size_t) stream_id * (size_t) kv_size * row_bytes;
+        const size_t total_bytes = (size_t) n_tokens * row_bytes;
+
+        std::vector<uint8_t> tmp(total_bytes);
+        ggml_backend_tensor_get(v, tmp.data(), stream_offset_bytes, total_bytes);
+
+        if (v->type == GGML_TYPE_F32) {
+            std::memcpy(out_f32, tmp.data(), total_bytes);
+        } else {
+            const auto * traits = ggml_get_type_traits(v->type);
+            if (!traits || !traits->to_float) {
+                LLAMA_LOG_ERROR("%s: no to_float for V type %s\n", __func__, ggml_type_name(v->type));
+                return 0;
+            }
+            for (uint32_t t = 0; t < n_tokens; ++t) {
+                const uint8_t * src = tmp.data() + (size_t) t * row_bytes;
+                float         * dst = out_f32 + (size_t) t * n_embd_v_gqa;
+                traits->to_float(src, dst, (int64_t) n_embd_v_gqa);
+            }
+        }
+    } else {
+        // Transposed: tensor shape [kv_size, n_embd_v_gqa, n_stream].
+        // The data is laid out such that column j contains n_embd_v_gqa values
+        // corresponding to token j. We need to read n_tokens columns.
+        //
+        // Since v_trans is typically used for F16/F32 (quantized V only works with
+        // flash attention which forces v_trans=false), we only need to support
+        // element-wise reads for non-block types.
+        const size_t el_size = ggml_type_size(v->type);
+        if (ggml_is_quantized(v->type)) {
+            LLAMA_LOG_ERROR("%s: cannot dump transposed quantized V (type %s). Use -fa on to force non-transposed.\n",
+                            __func__, ggml_type_name(v->type));
+            return 0;
+        }
+
+        // Read the whole (n_embd_v_gqa, kv_size) slice for this stream
+        const size_t stream_bytes = (size_t) n_embd_v_gqa * (size_t) kv_size * el_size;
+        const size_t stream_offset_bytes = (size_t) stream_id * stream_bytes;
+
+        std::vector<uint8_t> tmp(stream_bytes);
+        ggml_backend_tensor_get(v, tmp.data(), stream_offset_bytes, stream_bytes);
+
+        // Convert each column into a row of the output
+        // Memory layout of the transposed V:
+        //   index (j, i) corresponds to dim0=j (token), dim1=i (embd)
+        //   linear offset: j + i * kv_size (in elements)
+        // Output layout: out_f32[t, i] = V[j=t, i]
+        std::vector<float> row_tmp;
+        if (v->type != GGML_TYPE_F32) {
+            row_tmp.resize(n_embd_v_gqa);
+        }
+
+        for (uint32_t t = 0; t < n_tokens; ++t) {
+            float * dst_row = out_f32 + (size_t) t * n_embd_v_gqa;
+
+            if (v->type == GGML_TYPE_F32) {
+                const float * src = reinterpret_cast<const float *>(tmp.data());
+                for (uint64_t i = 0; i < n_embd_v_gqa; ++i) {
+                    dst_row[i] = src[t + i * kv_size];
+                }
+            } else {
+                // Gather the column into a contiguous float16/bf16 scratch, then convert
+                const auto * traits = ggml_get_type_traits(v->type);
+                if (!traits || !traits->to_float) {
+                    LLAMA_LOG_ERROR("%s: no to_float for V type %s\n", __func__, ggml_type_name(v->type));
+                    return 0;
+                }
+
+                std::vector<uint8_t> col_tmp((size_t) n_embd_v_gqa * el_size);
+                for (uint64_t i = 0; i < n_embd_v_gqa; ++i) {
+                    const uint8_t * src = tmp.data() + (t + i * kv_size) * el_size;
+                    std::memcpy(col_tmp.data() + i * el_size, src, el_size);
+                }
+                traits->to_float(col_tmp.data(), dst_row, (int64_t) n_embd_v_gqa);
+            }
+        }
+    }
+
+    return n_floats_needed;
 }
 
 uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {

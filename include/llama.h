@@ -782,6 +782,62 @@ extern "C" {
     LLAMA_API bool llama_memory_can_shift(llama_memory_t mem);
 
     //
+    // KV cache introspection (debugging / analysis)
+    //
+    // NOTE: These APIs are intended for tooling (e.g. tools/kv-dump) that needs to
+    //       read the raw K/V tensor contents after a decode pass for offline
+    //       analysis. They only work when the context's memory is a plain
+    //       llama_kv_cache (not iSWA, hybrid, recurrent, etc.) and they do not
+    //       participate in the public stability guarantees of the library.
+    //       Behavior is undefined if called on unsupported memory types.
+
+    // return the number of KV cache layer slots (not necessarily equal to n_layer
+    // when some layers have no KV cache, e.g. recurrent layers). -1 on error.
+    LLAMA_API int32_t llama_kv_self_dbg_n_layers(const struct llama_context * ctx);
+
+    // map a KV cache layer slot index (0..n_layers-1) to the corresponding model
+    // layer id. Returns -1 on error.
+    LLAMA_API int32_t llama_kv_self_dbg_layer_id(const struct llama_context * ctx, int32_t ikv);
+
+    // return the v_trans flag (true when V is stored transposed). When flash
+    // attention is enabled this is false.
+    LLAMA_API bool llama_kv_self_dbg_v_trans(const struct llama_context * ctx);
+
+    // Return whether K / V are rotated with a Hadamard matrix before being
+    // stored in the cache. When these are true the values returned by
+    // llama_kv_self_dbg_dump_k/v are in the rotated basis. Set the env
+    // variable LLAMA_ATTN_ROT_DISABLE=1 to disable this rotation.
+    LLAMA_API bool llama_kv_self_dbg_attn_rot_k(const struct llama_context * ctx);
+    LLAMA_API bool llama_kv_self_dbg_attn_rot_v(const struct llama_context * ctx);
+
+    // Return the Hadamard rotation dimension used for K / V, or 0 if the
+    // rotation is disabled for that tensor.
+    LLAMA_API int32_t llama_kv_self_dbg_k_rot_dim(const struct llama_context * ctx);
+    LLAMA_API int32_t llama_kv_self_dbg_v_rot_dim(const struct llama_context * ctx);
+
+    // dump n_tokens rows of the K tensor for model layer il into out_f32 as float32
+    // out_f32 layout (row-major): [n_tokens, n_head_kv, n_embd_head_k]
+    // returns the number of float32 elements written on success, 0 on error
+    LLAMA_API size_t llama_kv_self_dbg_dump_k(
+            struct llama_context * ctx,
+                         int32_t   layer,
+                        uint32_t   n_tokens,
+                        uint32_t   stream_id,
+                           float * out_f32,
+                          size_t   out_capacity_floats);
+
+    // dump n_tokens rows of the V tensor for model layer il into out_f32 as float32
+    // out_f32 layout (row-major): [n_tokens, n_head_kv, n_embd_head_v]
+    // returns the number of float32 elements written on success, 0 on error
+    LLAMA_API size_t llama_kv_self_dbg_dump_v(
+            struct llama_context * ctx,
+                         int32_t   layer,
+                        uint32_t   n_tokens,
+                        uint32_t   stream_id,
+                           float * out_f32,
+                          size_t   out_capacity_floats);
+
+    //
     // State / sessions
     //
 

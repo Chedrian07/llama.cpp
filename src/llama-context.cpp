@@ -5,6 +5,7 @@
 #include "llama-impl.h"
 #include "llama-batch.h"
 #include "llama-io.h"
+#include "llama-kv-cache.h"
 #include "llama-memory.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
@@ -3315,6 +3316,113 @@ bool llama_memory_can_shift(llama_memory_t mem) {
     }
 
     return mem->get_can_shift();
+}
+
+//
+// KV cache introspection (debugging / analysis)
+//
+
+// Cast the context's memory to a llama_kv_cache if possible.
+// Returns nullptr if the underlying memory is not a plain llama_kv_cache
+// (e.g. iSWA, hybrid, recurrent).
+static llama_kv_cache * llama_kv_self_as_kv_cache(const llama_context * ctx) {
+    if (!ctx) {
+        return nullptr;
+    }
+    llama_memory_i * mem = ctx->get_memory();
+    if (!mem) {
+        return nullptr;
+    }
+    // dynamic_cast returns nullptr when the memory is iSWA/hybrid/recurrent
+    return dynamic_cast<llama_kv_cache *>(mem);
+}
+
+int32_t llama_kv_self_dbg_n_layers(const struct llama_context * ctx) {
+    llama_kv_cache * kv = llama_kv_self_as_kv_cache(ctx);
+    if (!kv) {
+        return -1;
+    }
+    return (int32_t) kv->dbg_get_n_layers();
+}
+
+int32_t llama_kv_self_dbg_layer_id(const struct llama_context * ctx, int32_t ikv) {
+    llama_kv_cache * kv = llama_kv_self_as_kv_cache(ctx);
+    if (!kv) {
+        return -1;
+    }
+    return kv->dbg_get_model_layer_id(ikv);
+}
+
+bool llama_kv_self_dbg_v_trans(const struct llama_context * ctx) {
+    llama_kv_cache * kv = llama_kv_self_as_kv_cache(ctx);
+    if (!kv) {
+        return false;
+    }
+    return kv->dbg_get_v_trans();
+}
+
+bool llama_kv_self_dbg_attn_rot_k(const struct llama_context * ctx) {
+    llama_kv_cache * kv = llama_kv_self_as_kv_cache(ctx);
+    if (!kv) {
+        return false;
+    }
+    return kv->dbg_get_attn_rot_k();
+}
+
+bool llama_kv_self_dbg_attn_rot_v(const struct llama_context * ctx) {
+    llama_kv_cache * kv = llama_kv_self_as_kv_cache(ctx);
+    if (!kv) {
+        return false;
+    }
+    return kv->dbg_get_attn_rot_v();
+}
+
+int32_t llama_kv_self_dbg_k_rot_dim(const struct llama_context * ctx) {
+    llama_kv_cache * kv = llama_kv_self_as_kv_cache(ctx);
+    if (!kv) {
+        return 0;
+    }
+    return kv->dbg_get_k_rot_dim();
+}
+
+int32_t llama_kv_self_dbg_v_rot_dim(const struct llama_context * ctx) {
+    llama_kv_cache * kv = llama_kv_self_as_kv_cache(ctx);
+    if (!kv) {
+        return 0;
+    }
+    return kv->dbg_get_v_rot_dim();
+}
+
+size_t llama_kv_self_dbg_dump_k(
+        struct llama_context * ctx,
+                     int32_t   layer,
+                    uint32_t   n_tokens,
+                    uint32_t   stream_id,
+                       float * out_f32,
+                      size_t   out_capacity_floats) {
+    llama_kv_cache * kv = llama_kv_self_as_kv_cache(ctx);
+    if (!kv || !out_f32) {
+        return 0;
+    }
+    // Make sure any async tensor operations from the last decode have completed
+    // before we read back the buffer contents.
+    ctx->synchronize();
+    return kv->dbg_dump_k_layer_f32(layer, n_tokens, stream_id, out_f32, out_capacity_floats);
+}
+
+size_t llama_kv_self_dbg_dump_v(
+        struct llama_context * ctx,
+                     int32_t   layer,
+                    uint32_t   n_tokens,
+                    uint32_t   stream_id,
+                       float * out_f32,
+                      size_t   out_capacity_floats) {
+    llama_kv_cache * kv = llama_kv_self_as_kv_cache(ctx);
+    if (!kv || !out_f32) {
+        return 0;
+    }
+    ctx->synchronize();
+    return kv->dbg_dump_v_layer_f32(layer, n_tokens, stream_id, out_f32, out_capacity_floats);
 }
 
 // llama state API

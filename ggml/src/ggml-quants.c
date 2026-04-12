@@ -1,5 +1,6 @@
 #define GGML_COMMON_IMPL_C
 #include "ggml-common.h"
+#include "ggml-common-turbo.h"
 
 #include "ggml-quants.h"
 #include "ggml-impl.h"
@@ -5488,4 +5489,648 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
     }
 
     return true;
+}
+
+// =====================================================================
+// TurboQuant Algorithm 1 (MSE) — CPU quantize/dequantize
+// =====================================================================
+
+#define TURBO_SEED 42
+#define TURBO_DIM  128
+
+// FWHT in-place (self-inverse up to scale factor n)
+static void turbo_fwht_inplace(float * x, int n) {
+    for (int len = 1; len < n; len <<= 1) {
+        for (int i = 0; i < n; i += len << 1) {
+            for (int j = 0; j < len; j++) {
+                float u = x[i + j];
+                float v = x[i + j + len];
+                x[i + j]       = u + v;
+                x[i + j + len] = u - v;
+            }
+        }
+    }
+}
+
+// Deterministic sign flip using golden ratio hash
+static void turbo_sign_flip(float * x, int n, uint32_t seed) {
+    for (int i = 0; i < n; i++) {
+        uint32_t h = seed * 2654435761u + (uint32_t)i * 2246822519u;
+        if (h >> 31) { x[i] = -x[i]; }
+    }
+}
+
+// Nearest centroid finders
+static inline int turbo_nearest_2bit(float val) {
+    if (val < TURBO2_BOUNDARIES[0]) return 0;
+    if (val < TURBO2_BOUNDARIES[1]) return 1;
+    if (val < TURBO2_BOUNDARIES[2]) return 2;
+    return 3;
+}
+
+static inline int turbo_nearest_3bit(float val) {
+    if (val < TURBO3_BOUNDARIES[3]) {
+        if (val < TURBO3_BOUNDARIES[1]) {
+            return val < TURBO3_BOUNDARIES[0] ? 0 : 1;
+        }
+        return val < TURBO3_BOUNDARIES[2] ? 2 : 3;
+    }
+    if (val < TURBO3_BOUNDARIES[5]) {
+        return val < TURBO3_BOUNDARIES[4] ? 4 : 5;
+    }
+    return val < TURBO3_BOUNDARIES[6] ? 6 : 7;
+}
+
+static inline int turbo_nearest_4bit(float val) {
+    if (val < TURBO4_BOUNDARIES[7]) {
+        if (val < TURBO4_BOUNDARIES[3]) {
+            if (val < TURBO4_BOUNDARIES[1]) {
+                return val < TURBO4_BOUNDARIES[0] ? 0 : 1;
+            }
+            return val < TURBO4_BOUNDARIES[2] ? 2 : 3;
+        }
+        if (val < TURBO4_BOUNDARIES[5]) {
+            return val < TURBO4_BOUNDARIES[4] ? 4 : 5;
+        }
+        return val < TURBO4_BOUNDARIES[6] ? 6 : 7;
+    }
+    if (val < TURBO4_BOUNDARIES[11]) {
+        if (val < TURBO4_BOUNDARIES[9]) {
+            return val < TURBO4_BOUNDARIES[8] ? 8 : 9;
+        }
+        return val < TURBO4_BOUNDARIES[10] ? 10 : 11;
+    }
+    if (val < TURBO4_BOUNDARIES[13]) {
+        return val < TURBO4_BOUNDARIES[12] ? 12 : 13;
+    }
+    return val < TURBO4_BOUNDARIES[14] ? 14 : 15;
+}
+
+// Forward rotation: normalize, sign flip, FWHT
+// Returns L2 norm. buf contains rotated coords ~ N(0,1).
+static float turbo_forward_rotate(const float * GGML_RESTRICT x, float * buf, int n) {
+    float norm = 0.0f;
+    for (int i = 0; i < n; i++) {
+        norm += x[i] * x[i];
+    }
+    norm = sqrtf(norm);
+
+    if (norm < 1e-30f) {
+        memset(buf, 0, n * sizeof(float));
+        return 0.0f;
+    }
+
+    const float inv_norm = 1.0f / norm;
+    for (int i = 0; i < n; i++) {
+        buf[i] = x[i] * inv_norm;
+    }
+
+    turbo_sign_flip(buf, n, TURBO_SEED);
+    turbo_fwht_inplace(buf, n);
+
+    return norm;
+}
+
+// Inverse rotation: FWHT, divide by n, undo sign flip, scale by norm
+static void turbo_inverse_rotate(float * buf, int n, float norm) {
+    turbo_fwht_inplace(buf, n);
+    const float scale = norm / (float)n;
+    for (int i = 0; i < n; i++) {
+        buf[i] *= scale;
+    }
+    turbo_sign_flip(buf, n, TURBO_SEED);
+}
+
+// =====================================================================
+// turbo2_0: 2-bit, 128 elements per block
+// =====================================================================
+
+void quantize_row_turbo2_0_ref(const float * GGML_RESTRICT x, block_turbo2_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        y[i].norm = turbo_forward_rotate(x, buf, TURBO_DIM);
+
+        memset(y[i].qs, 0, sizeof(y[i].qs));
+        for (int j = 0; j < TURBO_DIM; j++) {
+            int idx = turbo_nearest_2bit(buf[j]);
+            y[i].qs[j / 4] |= (uint8_t)(idx << (2 * (j % 4)));
+        }
+
+        x += QK_TURBO;
+    }
+}
+
+size_t quantize_turbo2_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    (void)imatrix;
+    const size_t row_size = ggml_row_size(GGML_TYPE_TURBO2_0, n_per_row);
+    quantize_row_turbo2_0_ref(src, (block_turbo2_0 *)dst, nrows * n_per_row);
+    return nrows * row_size;
+}
+
+void dequantize_row_turbo2_0(const block_turbo2_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        for (int j = 0; j < TURBO_DIM; j++) {
+            int idx = (x[i].qs[j / 4] >> (2 * (j % 4))) & 0x3;
+            buf[j] = TURBO2_CENTROIDS[idx];
+        }
+
+        turbo_inverse_rotate(buf, TURBO_DIM, x[i].norm);
+
+        memcpy(y, buf, TURBO_DIM * sizeof(float));
+        y += QK_TURBO;
+    }
+}
+
+// =====================================================================
+// turbo2h_0: 2.5-bit fractional (32ch x 3-bit + 96ch x 2-bit)
+// =====================================================================
+
+void quantize_row_turbo2h_0_ref(const float * GGML_RESTRICT x, block_turbo2h_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        y[i].norm = turbo_forward_rotate(x, buf, TURBO_DIM);
+
+        // First 32 channels: 3-bit, packed into qs_hi[12]
+        memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi));
+        for (int j = 0; j < 32; j++) {
+            int idx = turbo_nearest_3bit(buf[j]);
+            int bit_offset = j * 3;
+            int byte_idx = bit_offset / 8;
+            int bit_idx  = bit_offset % 8;
+            y[i].qs_hi[byte_idx] |= (uint8_t)((idx << bit_idx) & 0xFF);
+            if (bit_idx > 5) {
+                y[i].qs_hi[byte_idx + 1] |= (uint8_t)(idx >> (8 - bit_idx));
+            }
+        }
+
+        // Remaining 96 channels: 2-bit, packed into qs_lo[24]
+        memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo));
+        for (int j = 0; j < 96; j++) {
+            int idx = turbo_nearest_2bit(buf[32 + j]);
+            y[i].qs_lo[j / 4] |= (uint8_t)(idx << (2 * (j % 4)));
+        }
+
+        x += QK_TURBO;
+    }
+}
+
+size_t quantize_turbo2h_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    (void)imatrix;
+    const size_t row_size = ggml_row_size(GGML_TYPE_TURBO2H_0, n_per_row);
+    quantize_row_turbo2h_0_ref(src, (block_turbo2h_0 *)dst, nrows * n_per_row);
+    return nrows * row_size;
+}
+
+void dequantize_row_turbo2h_0(const block_turbo2h_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        // First 32 channels: unpack 3-bit from qs_hi
+        for (int j = 0; j < 32; j++) {
+            int bit_offset = j * 3;
+            int byte_idx = bit_offset / 8;
+            int bit_idx  = bit_offset % 8;
+            int val = (x[i].qs_hi[byte_idx] >> bit_idx);
+            if (bit_idx > 5) {
+                val |= (x[i].qs_hi[byte_idx + 1] << (8 - bit_idx));
+            }
+            val &= 0x7;
+            buf[j] = TURBO3_CENTROIDS[val];
+        }
+
+        // Remaining 96 channels: unpack 2-bit from qs_lo
+        for (int j = 0; j < 96; j++) {
+            int idx = (x[i].qs_lo[j / 4] >> (2 * (j % 4))) & 0x3;
+            buf[32 + j] = TURBO2_CENTROIDS[idx];
+        }
+
+        turbo_inverse_rotate(buf, TURBO_DIM, x[i].norm);
+
+        memcpy(y, buf, TURBO_DIM * sizeof(float));
+        y += QK_TURBO;
+    }
+}
+
+// =====================================================================
+// turbo3_0: 3-bit, 128 elements per block
+// =====================================================================
+
+void quantize_row_turbo3_0_ref(const float * GGML_RESTRICT x, block_turbo3_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        y[i].norm = turbo_forward_rotate(x, buf, TURBO_DIM);
+
+        memset(y[i].qs, 0, sizeof(y[i].qs));
+        for (int j = 0; j < TURBO_DIM; j++) {
+            int idx = turbo_nearest_3bit(buf[j]);
+            int bit_offset = j * 3;
+            int byte_idx = bit_offset / 8;
+            int bit_idx  = bit_offset % 8;
+            y[i].qs[byte_idx] |= (uint8_t)((idx << bit_idx) & 0xFF);
+            if (bit_idx > 5) {
+                y[i].qs[byte_idx + 1] |= (uint8_t)(idx >> (8 - bit_idx));
+            }
+        }
+
+        x += QK_TURBO;
+    }
+}
+
+size_t quantize_turbo3_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    (void)imatrix;
+    const size_t row_size = ggml_row_size(GGML_TYPE_TURBO3_0, n_per_row);
+    quantize_row_turbo3_0_ref(src, (block_turbo3_0 *)dst, nrows * n_per_row);
+    return nrows * row_size;
+}
+
+void dequantize_row_turbo3_0(const block_turbo3_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        for (int j = 0; j < TURBO_DIM; j++) {
+            int bit_offset = j * 3;
+            int byte_idx = bit_offset / 8;
+            int bit_idx  = bit_offset % 8;
+            int val = (x[i].qs[byte_idx] >> bit_idx);
+            if (bit_idx > 5) {
+                val |= (x[i].qs[byte_idx + 1] << (8 - bit_idx));
+            }
+            val &= 0x7;
+            buf[j] = TURBO3_CENTROIDS[val];
+        }
+
+        turbo_inverse_rotate(buf, TURBO_DIM, x[i].norm);
+
+        memcpy(y, buf, TURBO_DIM * sizeof(float));
+        y += QK_TURBO;
+    }
+}
+
+// =====================================================================
+// turbo3h_0: 3.5-bit fractional (64ch x 4-bit + 64ch x 3-bit)
+// =====================================================================
+
+void quantize_row_turbo3h_0_ref(const float * GGML_RESTRICT x, block_turbo3h_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        y[i].norm = turbo_forward_rotate(x, buf, TURBO_DIM);
+
+        // First 64 channels: 4-bit, packed into qs_hi[32] (2 per byte)
+        memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi));
+        for (int j = 0; j < 64; j++) {
+            int idx = turbo_nearest_4bit(buf[j]);
+            y[i].qs_hi[j / 2] |= (uint8_t)(idx << (4 * (j % 2)));
+        }
+
+        // Remaining 64 channels: 3-bit, packed into qs_lo[24]
+        memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo));
+        for (int j = 0; j < 64; j++) {
+            int idx = turbo_nearest_3bit(buf[64 + j]);
+            int bit_offset = j * 3;
+            int byte_idx = bit_offset / 8;
+            int bit_idx  = bit_offset % 8;
+            y[i].qs_lo[byte_idx] |= (uint8_t)((idx << bit_idx) & 0xFF);
+            if (bit_idx > 5) {
+                y[i].qs_lo[byte_idx + 1] |= (uint8_t)(idx >> (8 - bit_idx));
+            }
+        }
+
+        x += QK_TURBO;
+    }
+}
+
+size_t quantize_turbo3h_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    (void)imatrix;
+    const size_t row_size = ggml_row_size(GGML_TYPE_TURBO3H_0, n_per_row);
+    quantize_row_turbo3h_0_ref(src, (block_turbo3h_0 *)dst, nrows * n_per_row);
+    return nrows * row_size;
+}
+
+void dequantize_row_turbo3h_0(const block_turbo3h_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        // First 64 channels: unpack 4-bit from qs_hi
+        for (int j = 0; j < 64; j++) {
+            int idx = (x[i].qs_hi[j / 2] >> (4 * (j % 2))) & 0xF;
+            buf[j] = TURBO4_CENTROIDS[idx];
+        }
+
+        // Remaining 64 channels: unpack 3-bit from qs_lo
+        for (int j = 0; j < 64; j++) {
+            int bit_offset = j * 3;
+            int byte_idx = bit_offset / 8;
+            int bit_idx  = bit_offset % 8;
+            int val = (x[i].qs_lo[byte_idx] >> bit_idx);
+            if (bit_idx > 5) {
+                val |= (x[i].qs_lo[byte_idx + 1] << (8 - bit_idx));
+            }
+            val &= 0x7;
+            buf[64 + j] = TURBO3_CENTROIDS[val];
+        }
+
+        turbo_inverse_rotate(buf, TURBO_DIM, x[i].norm);
+
+        memcpy(y, buf, TURBO_DIM * sizeof(float));
+        y += QK_TURBO;
+    }
+}
+
+// =====================================================================
+// turbo4_0: 4-bit, 128 elements per block
+// =====================================================================
+
+void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        y[i].norm = turbo_forward_rotate(x, buf, TURBO_DIM);
+
+        memset(y[i].qs, 0, sizeof(y[i].qs));
+        for (int j = 0; j < TURBO_DIM; j++) {
+            int idx = turbo_nearest_4bit(buf[j]);
+            y[i].qs[j / 2] |= (uint8_t)(idx << (4 * (j % 2)));
+        }
+
+        x += QK_TURBO;
+    }
+}
+
+size_t quantize_turbo4_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    (void)imatrix;
+    const size_t row_size = ggml_row_size(GGML_TYPE_TURBO4_0, n_per_row);
+    quantize_row_turbo4_0_ref(src, (block_turbo4_0 *)dst, nrows * n_per_row);
+    return nrows * row_size;
+}
+
+void dequantize_row_turbo4_0(const block_turbo4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        for (int j = 0; j < TURBO_DIM; j++) {
+            int idx = (x[i].qs[j / 2] >> (4 * (j % 2))) & 0xF;
+            buf[j] = TURBO4_CENTROIDS[idx];
+        }
+
+        turbo_inverse_rotate(buf, TURBO_DIM, x[i].norm);
+
+        memcpy(y, buf, TURBO_DIM * sizeof(float));
+        y += QK_TURBO;
+    }
+}
+
+// =====================================================================
+// QJL helper for Algorithm 2 (prod) types
+// =====================================================================
+
+#define TURBO_QJL_SEED 137
+
+static void turbo_qjl_encode(const float * residual, uint8_t * qjl, int n) {
+    memset(qjl, 0, n / 8);
+    for (int i = 0; i < n; i++) {
+        uint32_t h = (uint32_t)TURBO_QJL_SEED * 2654435761u + (uint32_t)i * 2246822519u;
+        float proj_sign = (h & 0x80000000u) ? -1.0f : 1.0f;
+        float projected = residual[i] * proj_sign;
+        if (projected > 0.0f) {
+            qjl[i / 8] |= (1u << (i % 8));
+        }
+    }
+}
+
+// =====================================================================
+// turbop3_0: 2-bit MSE + 1-bit QJL = 3 total bits per element
+// =====================================================================
+
+void quantize_row_turbop3_0_ref(const float * GGML_RESTRICT x, block_turbop3_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+    float residual[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        y[i].norm = turbo_forward_rotate(x, buf, TURBO_DIM);
+
+        // 2-bit MSE quantize
+        memset(y[i].qs, 0, sizeof(y[i].qs));
+        for (int j = 0; j < TURBO_DIM; j++) {
+            int idx = turbo_nearest_2bit(buf[j]);
+            y[i].qs[j / 4] |= (uint8_t)(idx << (2 * (j % 4)));
+            residual[j] = buf[j] - TURBO2_CENTROIDS[idx];
+        }
+
+        // Residual L2 norm in rotated basis (needed for QJL correction in vec_dot)
+        float r_norm_sq = 0.0f;
+        for (int j = 0; j < TURBO_DIM; j++) {
+            r_norm_sq += residual[j] * residual[j];
+        }
+        y[i].r_norm = sqrtf(r_norm_sq);
+
+        // QJL encode residual
+        turbo_qjl_encode(residual, y[i].qjl, TURBO_DIM);
+
+        x += QK_TURBO;
+    }
+}
+
+size_t quantize_turbop3_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    (void)imatrix;
+    const size_t row_size = ggml_row_size(GGML_TYPE_TURBOP3_0, n_per_row);
+    quantize_row_turbop3_0_ref(src, (block_turbop3_0 *)dst, nrows * n_per_row);
+    return nrows * row_size;
+}
+
+void dequantize_row_turbop3_0(const block_turbop3_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        // MSE-only reconstruction (QJL ignored)
+        for (int j = 0; j < TURBO_DIM; j++) {
+            int idx = (x[i].qs[j / 4] >> (2 * (j % 4))) & 0x3;
+            buf[j] = TURBO2_CENTROIDS[idx];
+        }
+
+        turbo_inverse_rotate(buf, TURBO_DIM, x[i].norm);
+
+        memcpy(y, buf, TURBO_DIM * sizeof(float));
+        y += QK_TURBO;
+    }
+}
+
+// =====================================================================
+// turbop4_0: 3-bit MSE + 1-bit QJL = 4 total bits per element
+// =====================================================================
+
+void quantize_row_turbop4_0_ref(const float * GGML_RESTRICT x, block_turbop4_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+    float residual[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        y[i].norm = turbo_forward_rotate(x, buf, TURBO_DIM);
+
+        // 3-bit MSE quantize
+        memset(y[i].qs, 0, sizeof(y[i].qs));
+        for (int j = 0; j < TURBO_DIM; j++) {
+            int idx = turbo_nearest_3bit(buf[j]);
+            int bit_offset = j * 3;
+            int byte_idx = bit_offset / 8;
+            int bit_idx  = bit_offset % 8;
+            y[i].qs[byte_idx] |= (uint8_t)((idx << bit_idx) & 0xFF);
+            if (bit_idx > 5) {
+                y[i].qs[byte_idx + 1] |= (uint8_t)(idx >> (8 - bit_idx));
+            }
+            residual[j] = buf[j] - TURBO3_CENTROIDS[idx];
+        }
+
+        // Residual L2 norm in rotated basis (needed for QJL correction in vec_dot)
+        float r_norm_sq = 0.0f;
+        for (int j = 0; j < TURBO_DIM; j++) {
+            r_norm_sq += residual[j] * residual[j];
+        }
+        y[i].r_norm = sqrtf(r_norm_sq);
+
+        // QJL encode residual
+        turbo_qjl_encode(residual, y[i].qjl, TURBO_DIM);
+
+        x += QK_TURBO;
+    }
+}
+
+size_t quantize_turbop4_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    (void)imatrix;
+    const size_t row_size = ggml_row_size(GGML_TYPE_TURBOP4_0, n_per_row);
+    quantize_row_turbop4_0_ref(src, (block_turbop4_0 *)dst, nrows * n_per_row);
+    return nrows * row_size;
+}
+
+void dequantize_row_turbop4_0(const block_turbop4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        // MSE-only reconstruction (QJL ignored)
+        for (int j = 0; j < TURBO_DIM; j++) {
+            int bit_offset = j * 3;
+            int byte_idx = bit_offset / 8;
+            int bit_idx  = bit_offset % 8;
+            int val = (x[i].qs[byte_idx] >> bit_idx);
+            if (bit_idx > 5) {
+                val |= (x[i].qs[byte_idx + 1] << (8 - bit_idx));
+            }
+            val &= 0x7;
+            buf[j] = TURBO3_CENTROIDS[val];
+        }
+
+        turbo_inverse_rotate(buf, TURBO_DIM, x[i].norm);
+
+        memcpy(y, buf, TURBO_DIM * sizeof(float));
+        y += QK_TURBO;
+    }
+}
+
+// =====================================================================
+// turbop5_0: 4-bit MSE + 1-bit QJL = 5 total bits per element
+// =====================================================================
+
+void quantize_row_turbop5_0_ref(const float * GGML_RESTRICT x, block_turbop5_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+    float residual[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        y[i].norm = turbo_forward_rotate(x, buf, TURBO_DIM);
+
+        // 4-bit MSE quantize
+        memset(y[i].qs, 0, sizeof(y[i].qs));
+        for (int j = 0; j < TURBO_DIM; j++) {
+            int idx = turbo_nearest_4bit(buf[j]);
+            y[i].qs[j / 2] |= (uint8_t)(idx << (4 * (j % 2)));
+            residual[j] = buf[j] - TURBO4_CENTROIDS[idx];
+        }
+
+        // Residual L2 norm in rotated basis (needed for QJL correction in vec_dot)
+        float r_norm_sq = 0.0f;
+        for (int j = 0; j < TURBO_DIM; j++) {
+            r_norm_sq += residual[j] * residual[j];
+        }
+        y[i].r_norm = sqrtf(r_norm_sq);
+
+        // QJL encode residual
+        turbo_qjl_encode(residual, y[i].qjl, TURBO_DIM);
+
+        x += QK_TURBO;
+    }
+}
+
+size_t quantize_turbop5_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    (void)imatrix;
+    const size_t row_size = ggml_row_size(GGML_TYPE_TURBOP5_0, n_per_row);
+    quantize_row_turbop5_0_ref(src, (block_turbop5_0 *)dst, nrows * n_per_row);
+    return nrows * row_size;
+}
+
+void dequantize_row_turbop5_0(const block_turbop5_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO == 0);
+    const int64_t nb = k / QK_TURBO;
+
+    float buf[TURBO_DIM];
+
+    for (int64_t i = 0; i < nb; i++) {
+        // MSE-only reconstruction (QJL ignored)
+        for (int j = 0; j < TURBO_DIM; j++) {
+            int idx = (x[i].qs[j / 2] >> (4 * (j % 2))) & 0xF;
+            buf[j] = TURBO4_CENTROIDS[idx];
+        }
+
+        turbo_inverse_rotate(buf, TURBO_DIM, x[i].norm);
+
+        memcpy(y, buf, TURBO_DIM * sizeof(float));
+        y += QK_TURBO;
+    }
 }

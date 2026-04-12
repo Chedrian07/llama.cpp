@@ -156,6 +156,50 @@ public:
     ggml_type type_v() const;
 
     //
+    // KV cache introspection / dumping
+    //
+    // These are used by tools/kv-dump to extract raw K/V contents after a decode pass
+    // for offline analysis (e.g. TurboQuant quantization error studies).
+    //
+
+    // return the model layer id of a given KV cache layer slot (0..get_n_layers()-1)
+    // returns -1 if ikv is out of range
+    int32_t dbg_get_model_layer_id(int32_t ikv) const;
+
+    // return the number of KV cache layer slots
+    uint32_t dbg_get_n_layers() const;
+
+    // return the v_trans flag (false when flash attention is enabled)
+    bool dbg_get_v_trans() const;
+
+    // return whether K / V are rotated with a Hadamard matrix before being
+    // stored in the cache (only enabled when the corresponding cache type is
+    // quantized and the head size is divisible by 64). When these are true the
+    // values returned by dbg_dump_*_layer_f32 are in the rotated basis.
+    // Set LLAMA_ATTN_ROT_DISABLE=1 to disable this rotation for analysis.
+    bool dbg_get_attn_rot_k() const;
+    bool dbg_get_attn_rot_v() const;
+
+    // return the rotation size used by attn_rot_k / attn_rot_v (number of
+    // coordinates the Hadamard matrix is applied to). 0 if the corresponding
+    // rotation is disabled.
+    int32_t dbg_get_k_rot_dim() const;
+    int32_t dbg_get_v_rot_dim() const;
+
+    // copy n_tokens rows of the K tensor for model layer il into out_f32 as float32
+    // out_f32 layout (row-major): [n_tokens, n_head_kv, n_embd_head_k]
+    // returns the number of float32 elements written on success, 0 on error
+    size_t dbg_dump_k_layer_f32(int32_t il, uint32_t n_tokens, uint32_t stream_id,
+                                float * out_f32, size_t out_capacity_floats) const;
+
+    // copy n_tokens rows of the V tensor for model layer il into out_f32 as float32
+    // out_f32 layout (row-major): [n_tokens, n_head_kv, n_embd_head_v]
+    // handles both transposed and non-transposed V caches (flash attention uses non-transposed)
+    // returns the number of float32 elements written on success, 0 on error
+    size_t dbg_dump_v_layer_f32(int32_t il, uint32_t n_tokens, uint32_t stream_id,
+                                float * out_f32, size_t out_capacity_floats) const;
+
+    //
     // graph_build API
     //
 

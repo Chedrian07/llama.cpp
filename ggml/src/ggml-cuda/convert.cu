@@ -1,5 +1,6 @@
 #include "convert.cuh"
 #include "dequantize.cuh"
+#include "turbo-common.cuh"
 
 #include <cstdint>
 
@@ -656,6 +657,310 @@ static void dequantize_row_nvfp4_cuda(
     const int nb = k / QK_NVFP4;
     dequantize_block_nvfp4<<<nb, 32, 0, stream>>>(vx, y, k);
 }
+// =====================================================================
+// TurboQuant CUDA dequantize kernels
+// One CUDA block (128 threads) per TurboQuant block (128 elements).
+// Shared memory is used for cooperative FWHT butterfly.
+// =====================================================================
+
+#define TURBO_SEED_CUDA 42
+
+// Device-side FWHT using shared memory. n must be 128, threads must be 128.
+static __device__ void turbo_fwht_shared(float * smem, int tid) {
+    for (int len = 1; len < 128; len <<= 1) {
+        __syncthreads();
+        int half_pair = len;
+        int pair = len << 1;
+        int grp = tid / pair;
+        int pos = tid % pair;
+        if (pos < half_pair) {
+            int i = grp * pair + pos;
+            float u = smem[i];
+            float v = smem[i + half_pair];
+            smem[i]             = u + v;
+            smem[i + half_pair] = u - v;
+        }
+    }
+    __syncthreads();
+}
+
+// Device-side sign flip hash (same as CPU)
+static __device__ __forceinline__ bool turbo_sign_bit(int j) {
+    uint32_t h = TURBO_SEED_CUDA * 2654435761u + (uint32_t)j * 2246822519u;
+    return (h >> 31) != 0;
+}
+
+// --- turbo2_0 dequantize ---
+template<typename dst_t>
+static __global__ void dequantize_block_turbo2_0(const void * __restrict__ vx, dst_t * __restrict__ yy) {
+    const int64_t block_idx = blockIdx.x;
+    const int tid = threadIdx.x; // 0..127
+    const block_turbo2_0 * x = ((const block_turbo2_0 *)vx) + block_idx;
+
+    __shared__ float smem[128];
+
+    // Unpack 2-bit index and look up centroid
+    int byte_idx = tid / 4;
+    int bit_offset = (tid % 4) * 2;
+    int idx = (x->qs[byte_idx] >> bit_offset) & 0x3;
+    smem[tid] = TURBO2_CENTROIDS[idx];
+
+    // Inverse FWHT
+    turbo_fwht_shared(smem, tid);
+
+    // Scale and sign flip
+    float scale = x->norm / 128.0f;
+    float val = smem[tid] * scale;
+    if (turbo_sign_bit(tid)) val = -val;
+
+    yy[block_idx * 128 + tid] = ggml_cuda_cast<dst_t>(val);
+}
+
+template<typename dst_t>
+static void dequantize_row_turbo2_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int nb = k / QK_TURBO;
+    dequantize_block_turbo2_0<<<nb, 128, 0, stream>>>(vx, y);
+}
+
+// --- turbo2h_0 dequantize (32ch x 3-bit + 96ch x 2-bit) ---
+template<typename dst_t>
+static __global__ void dequantize_block_turbo2h_0(const void * __restrict__ vx, dst_t * __restrict__ yy) {
+    const int64_t block_idx = blockIdx.x;
+    const int tid = threadIdx.x;
+    const block_turbo2h_0 * x = ((const block_turbo2h_0 *)vx) + block_idx;
+
+    __shared__ float smem[128];
+
+    if (tid < 32) {
+        // 3-bit from qs_hi
+        int bit_offset = tid * 3;
+        int byte_idx = bit_offset / 8;
+        int bit_idx  = bit_offset % 8;
+        int val = (x->qs_hi[byte_idx] >> bit_idx);
+        if (bit_idx > 5) {
+            val |= (x->qs_hi[byte_idx + 1] << (8 - bit_idx));
+        }
+        val &= 0x7;
+        smem[tid] = TURBO3_CENTROIDS[val];
+    } else {
+        // 2-bit from qs_lo
+        int j = tid - 32;
+        int idx = (x->qs_lo[j / 4] >> (2 * (j % 4))) & 0x3;
+        smem[tid] = TURBO2_CENTROIDS[idx];
+    }
+
+    turbo_fwht_shared(smem, tid);
+
+    float scale = x->norm / 128.0f;
+    float val = smem[tid] * scale;
+    if (turbo_sign_bit(tid)) val = -val;
+
+    yy[block_idx * 128 + tid] = ggml_cuda_cast<dst_t>(val);
+}
+
+template<typename dst_t>
+static void dequantize_row_turbo2h_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int nb = k / QK_TURBO;
+    dequantize_block_turbo2h_0<<<nb, 128, 0, stream>>>(vx, y);
+}
+
+// --- turbo3_0 dequantize ---
+template<typename dst_t>
+static __global__ void dequantize_block_turbo3_0(const void * __restrict__ vx, dst_t * __restrict__ yy) {
+    const int64_t block_idx = blockIdx.x;
+    const int tid = threadIdx.x;
+    const block_turbo3_0 * x = ((const block_turbo3_0 *)vx) + block_idx;
+
+    __shared__ float smem[128];
+
+    int bit_offset = tid * 3;
+    int byte_idx = bit_offset / 8;
+    int bit_idx  = bit_offset % 8;
+    int val = (x->qs[byte_idx] >> bit_idx);
+    if (bit_idx > 5) {
+        val |= (x->qs[byte_idx + 1] << (8 - bit_idx));
+    }
+    val &= 0x7;
+    smem[tid] = TURBO3_CENTROIDS[val];
+
+    turbo_fwht_shared(smem, tid);
+
+    float scale = x->norm / 128.0f;
+    float v = smem[tid] * scale;
+    if (turbo_sign_bit(tid)) v = -v;
+
+    yy[block_idx * 128 + tid] = ggml_cuda_cast<dst_t>(v);
+}
+
+template<typename dst_t>
+static void dequantize_row_turbo3_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int nb = k / QK_TURBO;
+    dequantize_block_turbo3_0<<<nb, 128, 0, stream>>>(vx, y);
+}
+
+// --- turbo3h_0 dequantize (64ch x 4-bit + 64ch x 3-bit) ---
+template<typename dst_t>
+static __global__ void dequantize_block_turbo3h_0(const void * __restrict__ vx, dst_t * __restrict__ yy) {
+    const int64_t block_idx = blockIdx.x;
+    const int tid = threadIdx.x;
+    const block_turbo3h_0 * x = ((const block_turbo3h_0 *)vx) + block_idx;
+
+    __shared__ float smem[128];
+
+    if (tid < 64) {
+        // 4-bit from qs_hi
+        int idx = (x->qs_hi[tid / 2] >> (4 * (tid % 2))) & 0xF;
+        smem[tid] = TURBO4_CENTROIDS[idx];
+    } else {
+        // 3-bit from qs_lo
+        int j = tid - 64;
+        int bit_offset = j * 3;
+        int byte_idx = bit_offset / 8;
+        int bit_idx  = bit_offset % 8;
+        int val = (x->qs_lo[byte_idx] >> bit_idx);
+        if (bit_idx > 5) {
+            val |= (x->qs_lo[byte_idx + 1] << (8 - bit_idx));
+        }
+        val &= 0x7;
+        smem[tid] = TURBO3_CENTROIDS[val];
+    }
+
+    turbo_fwht_shared(smem, tid);
+
+    float scale = x->norm / 128.0f;
+    float v = smem[tid] * scale;
+    if (turbo_sign_bit(tid)) v = -v;
+
+    yy[block_idx * 128 + tid] = ggml_cuda_cast<dst_t>(v);
+}
+
+template<typename dst_t>
+static void dequantize_row_turbo3h_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int nb = k / QK_TURBO;
+    dequantize_block_turbo3h_0<<<nb, 128, 0, stream>>>(vx, y);
+}
+
+// --- turbo4_0 dequantize ---
+template<typename dst_t>
+static __global__ void dequantize_block_turbo4_0(const void * __restrict__ vx, dst_t * __restrict__ yy) {
+    const int64_t block_idx = blockIdx.x;
+    const int tid = threadIdx.x;
+    const block_turbo4_0 * x = ((const block_turbo4_0 *)vx) + block_idx;
+
+    __shared__ float smem[128];
+
+    int idx = (x->qs[tid / 2] >> (4 * (tid % 2))) & 0xF;
+    smem[tid] = TURBO4_CENTROIDS[idx];
+
+    turbo_fwht_shared(smem, tid);
+
+    float scale = x->norm / 128.0f;
+    float v = smem[tid] * scale;
+    if (turbo_sign_bit(tid)) v = -v;
+
+    yy[block_idx * 128 + tid] = ggml_cuda_cast<dst_t>(v);
+}
+
+template<typename dst_t>
+static void dequantize_row_turbo4_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int nb = k / QK_TURBO;
+    dequantize_block_turbo4_0<<<nb, 128, 0, stream>>>(vx, y);
+}
+
+// --- turbop3_0 dequantize (MSE-only, QJL ignored) ---
+template<typename dst_t>
+static __global__ void dequantize_block_turbop3_0(const void * __restrict__ vx, dst_t * __restrict__ yy) {
+    const int64_t block_idx = blockIdx.x;
+    const int tid = threadIdx.x;
+    const block_turbop3_0 * x = ((const block_turbop3_0 *)vx) + block_idx;
+
+    __shared__ float smem[128];
+
+    int byte_idx = tid / 4;
+    int bit_offset = (tid % 4) * 2;
+    int idx = (x->qs[byte_idx] >> bit_offset) & 0x3;
+    smem[tid] = TURBO2_CENTROIDS[idx];
+
+    turbo_fwht_shared(smem, tid);
+
+    float scale = x->norm / 128.0f;
+    float v = smem[tid] * scale;
+    if (turbo_sign_bit(tid)) v = -v;
+
+    yy[block_idx * 128 + tid] = ggml_cuda_cast<dst_t>(v);
+}
+
+template<typename dst_t>
+static void dequantize_row_turbop3_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int nb = k / QK_TURBO;
+    dequantize_block_turbop3_0<<<nb, 128, 0, stream>>>(vx, y);
+}
+
+// --- turbop4_0 dequantize (3-bit MSE, QJL ignored) ---
+template<typename dst_t>
+static __global__ void dequantize_block_turbop4_0(const void * __restrict__ vx, dst_t * __restrict__ yy) {
+    const int64_t block_idx = blockIdx.x;
+    const int tid = threadIdx.x;
+    const block_turbop4_0 * x = ((const block_turbop4_0 *)vx) + block_idx;
+
+    __shared__ float smem[128];
+
+    int bit_offset = tid * 3;
+    int byte_idx = bit_offset / 8;
+    int bit_idx  = bit_offset % 8;
+    int val = (x->qs[byte_idx] >> bit_idx);
+    if (bit_idx > 5) {
+        val |= (x->qs[byte_idx + 1] << (8 - bit_idx));
+    }
+    val &= 0x7;
+    smem[tid] = TURBO3_CENTROIDS[val];
+
+    turbo_fwht_shared(smem, tid);
+
+    float scale = x->norm / 128.0f;
+    float v = smem[tid] * scale;
+    if (turbo_sign_bit(tid)) v = -v;
+
+    yy[block_idx * 128 + tid] = ggml_cuda_cast<dst_t>(v);
+}
+
+template<typename dst_t>
+static void dequantize_row_turbop4_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int nb = k / QK_TURBO;
+    dequantize_block_turbop4_0<<<nb, 128, 0, stream>>>(vx, y);
+}
+
+// --- turbop5_0 dequantize (4-bit MSE, QJL ignored) ---
+template<typename dst_t>
+static __global__ void dequantize_block_turbop5_0(const void * __restrict__ vx, dst_t * __restrict__ yy) {
+    const int64_t block_idx = blockIdx.x;
+    const int tid = threadIdx.x;
+    const block_turbop5_0 * x = ((const block_turbop5_0 *)vx) + block_idx;
+
+    __shared__ float smem[128];
+
+    int idx = (x->qs[tid / 2] >> (4 * (tid % 2))) & 0xF;
+    smem[tid] = TURBO4_CENTROIDS[idx];
+
+    turbo_fwht_shared(smem, tid);
+
+    float scale = x->norm / 128.0f;
+    float v = smem[tid] * scale;
+    if (turbo_sign_bit(tid)) v = -v;
+
+    yy[block_idx * 128 + tid] = ggml_cuda_cast<dst_t>(v);
+}
+
+template<typename dst_t>
+static void dequantize_row_turbop5_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int nb = k / QK_TURBO;
+    dequantize_block_turbop5_0<<<nb, 128, 0, stream>>>(vx, y);
+}
+
+// =====================================================================
+// End TurboQuant CUDA dequantize kernels
+// =====================================================================
+
 template <typename src_t, typename dst_t>
 static __global__ void convert_unary(
         const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t ne00, const int64_t ne01,
@@ -756,6 +1061,22 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
             return dequantize_row_mxfp4_cuda;
         case GGML_TYPE_NVFP4:
             return dequantize_row_nvfp4_cuda;
+        case GGML_TYPE_TURBO2_0:
+            return dequantize_row_turbo2_0_cuda;
+        case GGML_TYPE_TURBO2H_0:
+            return dequantize_row_turbo2h_0_cuda;
+        case GGML_TYPE_TURBO3_0:
+            return dequantize_row_turbo3_0_cuda;
+        case GGML_TYPE_TURBO3H_0:
+            return dequantize_row_turbo3h_0_cuda;
+        case GGML_TYPE_TURBO4_0:
+            return dequantize_row_turbo4_0_cuda;
+        case GGML_TYPE_TURBOP3_0:
+            return dequantize_row_turbop3_0_cuda;
+        case GGML_TYPE_TURBOP4_0:
+            return dequantize_row_turbop4_0_cuda;
+        case GGML_TYPE_TURBOP5_0:
+            return dequantize_row_turbop5_0_cuda;
         case GGML_TYPE_F32:
             return convert_unary_cont_cuda<float>;
         case GGML_TYPE_BF16:
@@ -809,6 +1130,22 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
             return dequantize_row_mxfp4_cuda;
         case GGML_TYPE_NVFP4:
             return dequantize_row_nvfp4_cuda;
+        case GGML_TYPE_TURBO2_0:
+            return dequantize_row_turbo2_0_cuda;
+        case GGML_TYPE_TURBO2H_0:
+            return dequantize_row_turbo2h_0_cuda;
+        case GGML_TYPE_TURBO3_0:
+            return dequantize_row_turbo3_0_cuda;
+        case GGML_TYPE_TURBO3H_0:
+            return dequantize_row_turbo3h_0_cuda;
+        case GGML_TYPE_TURBO4_0:
+            return dequantize_row_turbo4_0_cuda;
+        case GGML_TYPE_TURBOP3_0:
+            return dequantize_row_turbop3_0_cuda;
+        case GGML_TYPE_TURBOP4_0:
+            return dequantize_row_turbop4_0_cuda;
+        case GGML_TYPE_TURBOP5_0:
+            return dequantize_row_turbop5_0_cuda;
         case GGML_TYPE_F16:
             return convert_unary_cont_cuda<half>;
         case GGML_TYPE_BF16:

@@ -277,6 +277,11 @@ typedef struct {
 } block_tq2_0;
 static_assert(sizeof(block_tq2_0) == sizeof(ggml_half) + QK_K / 4, "wrong tq2_0 block size/padding");
 
+// TurboQuant (Turbo* / TurboP*) block structs and codebook tables are
+// intentionally defined in ggml-common-turbo.h. Only TUs that actually
+// use them should include that header, to avoid cascading rebuilds
+// whenever TurboQuant struct layouts change.
+
 //
 // Super-block quantization structures
 //
@@ -1895,6 +1900,8 @@ GGML_TABLE_BEGIN(uint32_t, iq1s_grid_gpu, NGRID_IQ1S)
     0x22202022, 0x22202220, 0x22202222, 0x22212121, 0x22222020, 0x22222022, 0x22222220, 0x22222222,
 GGML_TABLE_END()
 #endif
+
+// TurboQuant Lloyd-Max codebook tables moved to ggml-common-turbo.h.
 
 #endif // GGML_COMMON_IMPL
 #endif // GGML_COMMON_IMPL

@@ -1,0 +1,5 @@
+set(TARGET llama-kv-dump)
+add_executable(${TARGET} kv-dump.cpp)
+install(TARGETS ${TARGET} RUNTIME)
+target_link_libraries(${TARGET} PRIVATE common mtmd Threads::Threads)
+target_compile_features(${TARGET} PRIVATE cxx_std_17)

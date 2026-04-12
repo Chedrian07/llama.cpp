@@ -284,6 +284,21 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_BF16, GGML_TYPE_BF16)
 #endif // GGML_CUDA_FA_ALL_QUANTS
 
+    // TurboQuant symmetric combinations
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO2_0,  GGML_TYPE_TURBO2_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO2H_0, GGML_TYPE_TURBO2H_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO3_0,  GGML_TYPE_TURBO3_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO3H_0, GGML_TYPE_TURBO3H_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO4_0,  GGML_TYPE_TURBO4_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBOP3_0, GGML_TYPE_TURBOP3_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBOP4_0, GGML_TYPE_TURBOP4_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBOP5_0, GGML_TYPE_TURBOP5_0)
+
+    // TurboQuant asymmetric combinations (K/V different)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO4_0,  GGML_TYPE_TURBO2_0)   // K4/V2
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO4_0,  GGML_TYPE_TURBO3_0)   // K4/V3
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO3_0,  GGML_TYPE_TURBO2_0)   // K3/V2
+
     GGML_ABORT("fatal error");
 }
 
@@ -365,7 +380,10 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     }
 
 #ifndef GGML_CUDA_FA_ALL_QUANTS
-    if (K->type != V->type) {
+    // Allow asymmetric K/V for TurboQuant types (always compiled)
+    const bool turbo_kv = (K->type >= GGML_TYPE_TURBO2_0 && K->type <= GGML_TYPE_TURBOP5_0) ||
+                          (V->type >= GGML_TYPE_TURBO2_0 && V->type <= GGML_TYPE_TURBOP5_0);
+    if (K->type != V->type && !turbo_kv) {
         return BEST_FATTN_KERNEL_NONE;
     }
 #endif // GGML_CUDA_FA_ALL_QUANTS
@@ -384,12 +402,30 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_BF16:
             break;
+        // TurboQuant types: always supported via vec kernel
+        case GGML_TYPE_TURBO2_0:
+        case GGML_TYPE_TURBO2H_0:
+        case GGML_TYPE_TURBO3_0:
+        case GGML_TYPE_TURBO3H_0:
+        case GGML_TYPE_TURBO4_0:
+        case GGML_TYPE_TURBOP3_0:
+        case GGML_TYPE_TURBOP4_0:
+        case GGML_TYPE_TURBOP5_0:
+            break;
         default:
             return BEST_FATTN_KERNEL_NONE;
     }
 
     if (mask && mask->ne[2] != 1) {
         return BEST_FATTN_KERNEL_NONE;
+    }
+
+    // TurboQuant types only support the vec kernel path
+    const bool is_turbo_K = K->type >= GGML_TYPE_TURBO2_0 && K->type <= GGML_TYPE_TURBOP5_0;
+    const bool is_turbo_V = V->type >= GGML_TYPE_TURBO2_0 && V->type <= GGML_TYPE_TURBOP5_0;
+    if (is_turbo_K || is_turbo_V) {
+        const bool can_use_vec = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0 && K->ne[1] % FATTN_KQ_STRIDE == 0;
+        return can_use_vec ? BEST_FATTN_KERNEL_VEC : BEST_FATTN_KERNEL_NONE;
     }
 
     // For small batch sizes the vector kernel may be preferable over the kernels optimized for large batch sizes:
