@@ -262,7 +262,54 @@ void ggml_cuda_op_mul_mat_q(
     GGML_UNUSED_VARS(src1, dst, src1_ddf_i, src1_padded_row_size);
 }
 
-bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t n_experts) {
+template<ggml_type type>
+static bool ggml_cuda_has_valid_mmq_config(const int cc, const int warp_size, const size_t smpbo) {
+    const int mmq_x_max = get_mmq_x_max_host(cc);
+    const int mmq_y = get_mmq_y_host(cc);
+    const int nwarps = mmq_get_nwarps_host(cc, warp_size);
+
+    for (int mmq_x = 8; mmq_x <= mmq_x_max; mmq_x += 8) {
+        const int granularity = mmq_get_granularity_host(mmq_x, cc);
+
+        if (mmq_x % granularity != 0) {
+            continue;
+        }
+
+        if (mmq_get_nbytes_shared<type>(mmq_x, mmq_y, cc, warp_size, nwarps) <= smpbo) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool ggml_cuda_has_valid_mmq_config(enum ggml_type type, const int cc, const int warp_size, const size_t smpbo) {
+    switch (type) {
+        case GGML_TYPE_Q4_0:    return ggml_cuda_has_valid_mmq_config<GGML_TYPE_Q4_0>(cc, warp_size, smpbo);
+        case GGML_TYPE_Q4_1:    return ggml_cuda_has_valid_mmq_config<GGML_TYPE_Q4_1>(cc, warp_size, smpbo);
+        case GGML_TYPE_Q5_0:    return ggml_cuda_has_valid_mmq_config<GGML_TYPE_Q5_0>(cc, warp_size, smpbo);
+        case GGML_TYPE_Q5_1:    return ggml_cuda_has_valid_mmq_config<GGML_TYPE_Q5_1>(cc, warp_size, smpbo);
+        case GGML_TYPE_Q8_0:    return ggml_cuda_has_valid_mmq_config<GGML_TYPE_Q8_0>(cc, warp_size, smpbo);
+        case GGML_TYPE_MXFP4:   return ggml_cuda_has_valid_mmq_config<GGML_TYPE_MXFP4>(cc, warp_size, smpbo);
+        case GGML_TYPE_NVFP4:   return ggml_cuda_has_valid_mmq_config<GGML_TYPE_NVFP4>(cc, warp_size, smpbo);
+        case GGML_TYPE_Q2_K:    return ggml_cuda_has_valid_mmq_config<GGML_TYPE_Q2_K>(cc, warp_size, smpbo);
+        case GGML_TYPE_Q3_K:    return ggml_cuda_has_valid_mmq_config<GGML_TYPE_Q3_K>(cc, warp_size, smpbo);
+        case GGML_TYPE_Q4_K:    return ggml_cuda_has_valid_mmq_config<GGML_TYPE_Q4_K>(cc, warp_size, smpbo);
+        case GGML_TYPE_Q5_K:    return ggml_cuda_has_valid_mmq_config<GGML_TYPE_Q5_K>(cc, warp_size, smpbo);
+        case GGML_TYPE_Q6_K:    return ggml_cuda_has_valid_mmq_config<GGML_TYPE_Q6_K>(cc, warp_size, smpbo);
+        case GGML_TYPE_IQ2_XXS: return ggml_cuda_has_valid_mmq_config<GGML_TYPE_IQ2_XXS>(cc, warp_size, smpbo);
+        case GGML_TYPE_IQ2_XS:  return ggml_cuda_has_valid_mmq_config<GGML_TYPE_IQ2_XS>(cc, warp_size, smpbo);
+        case GGML_TYPE_IQ2_S:   return ggml_cuda_has_valid_mmq_config<GGML_TYPE_IQ2_S>(cc, warp_size, smpbo);
+        case GGML_TYPE_IQ3_XXS: return ggml_cuda_has_valid_mmq_config<GGML_TYPE_IQ3_XXS>(cc, warp_size, smpbo);
+        case GGML_TYPE_IQ3_S:   return ggml_cuda_has_valid_mmq_config<GGML_TYPE_IQ3_S>(cc, warp_size, smpbo);
+        case GGML_TYPE_IQ1_S:   return ggml_cuda_has_valid_mmq_config<GGML_TYPE_IQ1_S>(cc, warp_size, smpbo);
+        case GGML_TYPE_IQ4_XS:  return ggml_cuda_has_valid_mmq_config<GGML_TYPE_IQ4_XS>(cc, warp_size, smpbo);
+        case GGML_TYPE_IQ4_NL:  return ggml_cuda_has_valid_mmq_config<GGML_TYPE_IQ4_NL>(cc, warp_size, smpbo);
+        default:                return false;
+    }
+}
+
+bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int warp_size, size_t smpbo, int64_t ne11, int64_t n_experts) {
 #ifdef GGML_CUDA_FORCE_CUBLAS
     return false;
 #endif // GGML_CUDA_FORCE_CUBLAS
@@ -298,6 +345,10 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
     }
 
     if (!mmq_supported) {
+        return false;
+    }
+
+    if (!ggml_cuda_has_valid_mmq_config(type, cc, warp_size, smpbo)) {
         return false;
     }
 
