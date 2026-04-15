@@ -628,8 +628,9 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo(
     char * blk_sm = turbo_kq_blk_stage[warp_id];
     {
         constexpr int blk_bytes = (int)turbo_block_size<turbo_type>();
+        const char * __restrict__ src = K_c;
         for (int i = lane; i < blk_bytes; i += WARP_SIZE) {
-            blk_sm[i] = K_c[i];
+            ggml_cuda_memcpy_1<1>(&blk_sm[i], &src[i]);
         }
         __syncwarp();
     }
@@ -712,8 +713,9 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbop(
     char * blk_sm = turbop_kq_blk_stage[warp_id];
     {
         constexpr int blk_bytes = (int)turbo_block_size<turbo_type>();
+        const char * __restrict__ src = K_c;
         for (int i = lane; i < blk_bytes; i += WARP_SIZE) {
-            blk_sm[i] = K_c[i];
+            ggml_cuda_memcpy_1<1>(&blk_sm[i], &src[i]);
         }
         __syncwarp();
     }
@@ -839,8 +841,11 @@ static __device__ __forceinline__ void dequantize_V_turbo(const void * __restric
     constexpr size_t block_size = turbo_block_size<turbo_type>();
     const char * blk_global = (const char *)vx + ib * block_size;
     char * blk_sm = turbo_v_blk_stage[warp_id];
-    for (int i = lane; i < (int)block_size; i += WARP_SIZE) {
-        blk_sm[i] = blk_global[i];
+    {
+        const char * __restrict__ src = blk_global;
+        for (int i = lane; i < (int)block_size; i += WARP_SIZE) {
+            ggml_cuda_memcpy_1<1>(&blk_sm[i], &src[i]);
+        }
     }
     __syncwarp();
 
