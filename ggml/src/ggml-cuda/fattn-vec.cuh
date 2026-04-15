@@ -526,8 +526,23 @@ void ggml_cuda_flash_attn_ext_vec_case_impl(ggml_backend_cuda_context & ctx, ggm
     const int nthreads = ggml_cuda_fattn_vec_get_nthreads_host(cc);
     const int nwarps   = nthreads / WARP_SIZE;
     fattn_kernel_t fattn_kernel = flash_attn_ext_vec<D, cols_per_block, type_K, type_V, use_logit_softcap>;
+    // CUDA 12.x targeting sm_120 (Blackwell) has a compiler bug where
+    // generic-pointer shared-memory indexing in the cooperative FWHT emits
+    // byte-stride loads instead of float-stride loads.  On that specific
+    // combination we convert turbo K/V to F16 before the kernel.  The KV
+    // cache itself stays in turbo format (memory savings preserved), but
+    // prod types lose QJL correction (MSE-only).  A100/L4 (sm_80/89) are
+    // unaffected.  CUDA 13.x fixes the codegen and uses the native kernel.
+#if CUDART_VERSION < 13000
+    constexpr bool turbo_KV = (type_K >= GGML_TYPE_TURBO2_0 && type_K <= GGML_TYPE_TURBOP5_0)
+                           || (type_V >= GGML_TYPE_TURBO2_0 && type_V <= GGML_TYPE_TURBOP5_0);
+    const bool blackwell_workaround = turbo_KV && cc >= GGML_CUDA_CC_BLACKWELL;
+    const bool need_f16_K = type_K == GGML_TYPE_F16 || (blackwell_workaround && type_K != GGML_TYPE_F16);
+    const bool need_f16_V = type_V == GGML_TYPE_F16 || (blackwell_workaround && type_V != GGML_TYPE_F16);
+#else
     const bool need_f16_K = type_K == GGML_TYPE_F16;
     const bool need_f16_V = type_V == GGML_TYPE_F16;
+#endif
     constexpr size_t nbytes_shared = 0;
     launch_fattn<D, cols_per_block, 1>(ctx, dst, fattn_kernel, nwarps, nbytes_shared, D, need_f16_K, need_f16_V, false);
 }
