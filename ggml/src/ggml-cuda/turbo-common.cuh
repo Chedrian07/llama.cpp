@@ -245,46 +245,66 @@ static __device__ __forceinline__ void cooperative_inverse_rotate(float * buf, c
 }
 
 // ---- Per-type cooperative unpack functions ----
+//
+// All functions take a raw const char* to avoid struct-pointer casts that let
+// nvcc (especially CUDA 12.8 targeting sm_120) emit widened loads whose
+// alignment requirements exceed non-power-of-2 turbo block strides.
+// Float fields (norm, r_norm) are read with memcpy; byte arrays are accessed
+// through direct char indexing.  Both are alignment-agnostic.
+
+// Helper: read a float from an arbitrary address without alignment assumptions.
+static __device__ __forceinline__ float turbo_read_f32(const char * p) {
+    float v;
+    memcpy(&v, p, sizeof(float));
+    return v;
+}
+
+// Byte-offset constants for each block layout (match ggml-common-turbo.h structs).
+// Algorithm 1 MSE: [float norm][uint8_t qs[...]]
+#define TURBO_OFF_NORM 0
+#define TURBO_OFF_QS   4  /* sizeof(float) */
+// Algorithm 1 fractional: [float norm][uint8_t qs_hi[...]][uint8_t qs_lo[...]]
+#define TURBO2H_OFF_QS_HI  4
+#define TURBO2H_OFF_QS_LO  (4 + 12)   /* 16 */
+#define TURBO3H_OFF_QS_HI  4
+#define TURBO3H_OFF_QS_LO  (4 + 32)   /* 36 */
+// Algorithm 2 prod: [float norm][float r_norm][uint8_t qs[...]][uint8_t qjl[16]]
+#define TURBOP_OFF_NORM   0
+#define TURBOP_OFF_RNORM  4
+#define TURBOP_OFF_QS     8  /* sizeof(float)*2 */
 
 static __device__ __forceinline__ void cooperative_dequantize_turbo2(
-    const block_turbo2_0 * __restrict__ blk, float * dst, const int lane) {
-    // Each lane unpacks 4 elements. 2-bit packing: 4 vals per byte.
-    // Lane l handles indices [l*4, l*4+3] which are all contained in qs[l] (single byte).
-    const uint8_t byte = blk->qs[lane];
+    const char * __restrict__ raw, float * dst, const int lane) {
+    const uint8_t byte = (uint8_t)raw[TURBO_OFF_QS + lane];
     #pragma unroll
     for (int k = 0; k < 4; ++k) {
         const int idx = (byte >> (2 * k)) & 0x3;
         dst[lane * 4 + k] = TURBO2_CENTROIDS[idx];
     }
     __syncwarp();
-    cooperative_inverse_rotate(dst, lane, blk->norm);
+    cooperative_inverse_rotate(dst, lane, turbo_read_f32(raw + TURBO_OFF_NORM));
 }
 
 static __device__ __forceinline__ void cooperative_dequantize_turbo2h(
-    const block_turbo2h_0 * __restrict__ blk, float * dst, const int lane) {
-    // 4 elements per lane. For lanes 0..7: indices [0..31] from qs_hi (3-bit).
-    // For lanes 8..31: indices [32..127] from qs_lo (2-bit).
+    const char * __restrict__ raw, float * dst, const int lane) {
     if (lane < 8) {
-        // 3-bit indices in qs_hi, elements [lane*4 .. lane*4+3]
         #pragma unroll
         for (int k = 0; k < 4; ++k) {
             const int j = lane * 4 + k;
             const int bit_offset = j * 3;
             const int byte_idx   = bit_offset / 8;
             const int bit_idx    = bit_offset % 8;
-            int val = (blk->qs_hi[byte_idx] >> bit_idx);
+            int val = ((uint8_t)raw[TURBO2H_OFF_QS_HI + byte_idx] >> bit_idx);
             if (bit_idx > 5) {
-                val |= (blk->qs_hi[byte_idx + 1] << (8 - bit_idx));
+                val |= ((uint8_t)raw[TURBO2H_OFF_QS_HI + byte_idx + 1] << (8 - bit_idx));
             }
             val &= 0x7;
             dst[j] = TURBO3_CENTROIDS[val];
         }
     } else {
-        // 2-bit indices in qs_lo, elements j=lane*4..lane*4+3, but stored starting at j=32
-        // i.e. qs_lo index = (j - 32)
-        const int j_base = lane * 4;                 // e.g. lane=8 -> j_base=32
-        const int lo_base = j_base - 32;             // e.g. lane=8 -> lo_base=0
-        const uint8_t byte = blk->qs_lo[lo_base / 4];
+        const int j_base  = lane * 4;
+        const int lo_base = j_base - 32;
+        const uint8_t byte = (uint8_t)raw[TURBO2H_OFF_QS_LO + lo_base / 4];
         #pragma unroll
         for (int k = 0; k < 4; ++k) {
             const int idx = (byte >> (2 * k)) & 0x3;
@@ -292,49 +312,40 @@ static __device__ __forceinline__ void cooperative_dequantize_turbo2h(
         }
     }
     __syncwarp();
-    cooperative_inverse_rotate(dst, lane, blk->norm);
+    cooperative_inverse_rotate(dst, lane, turbo_read_f32(raw + TURBO_OFF_NORM));
 }
 
 static __device__ __forceinline__ void cooperative_dequantize_turbo3(
-    const block_turbo3_0 * __restrict__ blk, float * dst, const int lane) {
-    // 4 elements per lane. 3-bit packing: lane l handles indices [l*4..l*4+3].
-    // Offsets in bits: (l*4*3, l*4*3+3, l*4*3+6, l*4*3+9) = (l*12, l*12+3, l*12+6, l*12+9).
-    // Each lane uses bytes in the range [l*12/8 .. (l*12+11)/8] = up to 2-3 bytes.
+    const char * __restrict__ raw, float * dst, const int lane) {
     #pragma unroll
     for (int k = 0; k < 4; ++k) {
         const int j = lane * 4 + k;
         const int bit_offset = j * 3;
         const int byte_idx   = bit_offset / 8;
         const int bit_idx    = bit_offset % 8;
-        int val = (blk->qs[byte_idx] >> bit_idx);
+        int val = ((uint8_t)raw[TURBO_OFF_QS + byte_idx] >> bit_idx);
         if (bit_idx > 5) {
-            val |= (blk->qs[byte_idx + 1] << (8 - bit_idx));
+            val |= ((uint8_t)raw[TURBO_OFF_QS + byte_idx + 1] << (8 - bit_idx));
         }
         val &= 0x7;
         dst[j] = TURBO3_CENTROIDS[val];
     }
     __syncwarp();
-    cooperative_inverse_rotate(dst, lane, blk->norm);
+    cooperative_inverse_rotate(dst, lane, turbo_read_f32(raw + TURBO_OFF_NORM));
 }
 
 static __device__ __forceinline__ void cooperative_dequantize_turbo3h(
-    const block_turbo3h_0 * __restrict__ blk, float * dst, const int lane) {
-    // First 64 channels (lanes 0..15): 4-bit from qs_hi
-    // Last 64 channels (lanes 16..31): 3-bit from qs_lo
+    const char * __restrict__ raw, float * dst, const int lane) {
     if (lane < 16) {
-        // 4-bit indices, elements [lane*4 .. lane*4+3]
-        // Each element uses 4 bits, so lane's 4 elements fit in 16 bits = 2 bytes.
         const int j_base = lane * 4;
-        const uint8_t b0 = blk->qs_hi[j_base / 2];       // elems j_base, j_base+1
-        const uint8_t b1 = blk->qs_hi[j_base / 2 + 1];   // elems j_base+2, j_base+3
+        const uint8_t b0 = (uint8_t)raw[TURBO3H_OFF_QS_HI + j_base / 2];
+        const uint8_t b1 = (uint8_t)raw[TURBO3H_OFF_QS_HI + j_base / 2 + 1];
         dst[j_base + 0] = TURBO4_CENTROIDS[b0 & 0xF];
         dst[j_base + 1] = TURBO4_CENTROIDS[(b0 >> 4) & 0xF];
         dst[j_base + 2] = TURBO4_CENTROIDS[b1 & 0xF];
         dst[j_base + 3] = TURBO4_CENTROIDS[(b1 >> 4) & 0xF];
     } else {
-        // 3-bit indices in qs_lo, elements [lane*4 .. lane*4+3] (global), stored from 64
-        // qs_lo stores 64 elements, so index within qs_lo = j - 64.
-        const int j_global_base = lane * 4;         // e.g. lane=16 -> 64
+        const int j_global_base = lane * 4;
         #pragma unroll
         for (int k = 0; k < 4; ++k) {
             const int jg = j_global_base + k;
@@ -342,29 +353,28 @@ static __device__ __forceinline__ void cooperative_dequantize_turbo3h(
             const int bit_offset = j_local * 3;
             const int byte_idx   = bit_offset / 8;
             const int bit_idx    = bit_offset % 8;
-            int val = (blk->qs_lo[byte_idx] >> bit_idx);
+            int val = ((uint8_t)raw[TURBO3H_OFF_QS_LO + byte_idx] >> bit_idx);
             if (bit_idx > 5) {
-                val |= (blk->qs_lo[byte_idx + 1] << (8 - bit_idx));
+                val |= ((uint8_t)raw[TURBO3H_OFF_QS_LO + byte_idx + 1] << (8 - bit_idx));
             }
             val &= 0x7;
             dst[jg] = TURBO3_CENTROIDS[val];
         }
     }
     __syncwarp();
-    cooperative_inverse_rotate(dst, lane, blk->norm);
+    cooperative_inverse_rotate(dst, lane, turbo_read_f32(raw + TURBO_OFF_NORM));
 }
 
 static __device__ __forceinline__ void cooperative_dequantize_turbo4(
-    const block_turbo4_0 * __restrict__ blk, float * dst, const int lane) {
-    // 4-bit packing: 2 vals per byte. Lane l handles [l*4..l*4+3] = 2 bytes.
-    const uint8_t b0 = blk->qs[lane * 2];
-    const uint8_t b1 = blk->qs[lane * 2 + 1];
+    const char * __restrict__ raw, float * dst, const int lane) {
+    const uint8_t b0 = (uint8_t)raw[TURBO_OFF_QS + lane * 2];
+    const uint8_t b1 = (uint8_t)raw[TURBO_OFF_QS + lane * 2 + 1];
     dst[lane * 4 + 0] = TURBO4_CENTROIDS[b0 & 0xF];
     dst[lane * 4 + 1] = TURBO4_CENTROIDS[(b0 >> 4) & 0xF];
     dst[lane * 4 + 2] = TURBO4_CENTROIDS[b1 & 0xF];
     dst[lane * 4 + 3] = TURBO4_CENTROIDS[(b1 >> 4) & 0xF];
     __syncwarp();
-    cooperative_inverse_rotate(dst, lane, blk->norm);
+    cooperative_inverse_rotate(dst, lane, turbo_read_f32(raw + TURBO_OFF_NORM));
 }
 
 // Prod types: dequantize MSE part only (QJL correction is for inner product).
@@ -372,49 +382,46 @@ static __device__ __forceinline__ void cooperative_dequantize_turbo4(
 // ignore QJL. This is correct for the KQ dot product path in fattn-vec.
 
 static __device__ __forceinline__ void cooperative_dequantize_turbop3(
-    const block_turbop3_0 * __restrict__ blk, float * dst, const int lane) {
-    // 2-bit MSE, same layout as turbo2
-    const uint8_t byte = blk->qs[lane];
+    const char * __restrict__ raw, float * dst, const int lane) {
+    const uint8_t byte = (uint8_t)raw[TURBOP_OFF_QS + lane];
     #pragma unroll
     for (int k = 0; k < 4; ++k) {
         const int idx = (byte >> (2 * k)) & 0x3;
         dst[lane * 4 + k] = TURBO2_CENTROIDS[idx];
     }
     __syncwarp();
-    cooperative_inverse_rotate(dst, lane, blk->norm);
+    cooperative_inverse_rotate(dst, lane, turbo_read_f32(raw + TURBOP_OFF_NORM));
 }
 
 static __device__ __forceinline__ void cooperative_dequantize_turbop4(
-    const block_turbop4_0 * __restrict__ blk, float * dst, const int lane) {
-    // 3-bit MSE, same layout as turbo3
+    const char * __restrict__ raw, float * dst, const int lane) {
     #pragma unroll
     for (int k = 0; k < 4; ++k) {
         const int j = lane * 4 + k;
         const int bit_offset = j * 3;
         const int byte_idx   = bit_offset / 8;
         const int bit_idx    = bit_offset % 8;
-        int val = (blk->qs[byte_idx] >> bit_idx);
+        int val = ((uint8_t)raw[TURBOP_OFF_QS + byte_idx] >> bit_idx);
         if (bit_idx > 5) {
-            val |= (blk->qs[byte_idx + 1] << (8 - bit_idx));
+            val |= ((uint8_t)raw[TURBOP_OFF_QS + byte_idx + 1] << (8 - bit_idx));
         }
         val &= 0x7;
         dst[j] = TURBO3_CENTROIDS[val];
     }
     __syncwarp();
-    cooperative_inverse_rotate(dst, lane, blk->norm);
+    cooperative_inverse_rotate(dst, lane, turbo_read_f32(raw + TURBOP_OFF_NORM));
 }
 
 static __device__ __forceinline__ void cooperative_dequantize_turbop5(
-    const block_turbop5_0 * __restrict__ blk, float * dst, const int lane) {
-    // 4-bit MSE, same layout as turbo4
-    const uint8_t b0 = blk->qs[lane * 2];
-    const uint8_t b1 = blk->qs[lane * 2 + 1];
+    const char * __restrict__ raw, float * dst, const int lane) {
+    const uint8_t b0 = (uint8_t)raw[TURBOP_OFF_QS + lane * 2];
+    const uint8_t b1 = (uint8_t)raw[TURBOP_OFF_QS + lane * 2 + 1];
     dst[lane * 4 + 0] = TURBO4_CENTROIDS[b0 & 0xF];
     dst[lane * 4 + 1] = TURBO4_CENTROIDS[(b0 >> 4) & 0xF];
     dst[lane * 4 + 2] = TURBO4_CENTROIDS[b1 & 0xF];
     dst[lane * 4 + 3] = TURBO4_CENTROIDS[(b1 >> 4) & 0xF];
     __syncwarp();
-    cooperative_inverse_rotate(dst, lane, blk->norm);
+    cooperative_inverse_rotate(dst, lane, turbo_read_f32(raw + TURBOP_OFF_NORM));
 }
 
 // ==================== Algorithm 2 (prod) cooperative QJL helpers ====================
@@ -482,26 +489,27 @@ static __device__ __forceinline__ void cooperative_qjl_signs_to_orig(
     cooperative_inverse_rotate_unit(dst, lane);
 }
 
-// Generic cooperative dispatcher
+// Generic cooperative dispatcher — takes raw const char*, no struct-pointer casts.
 template <ggml_type type>
 static __device__ __forceinline__ void cooperative_dequantize_block(
     const void * blk, float * dst, const int lane) {
+    const char * raw = (const char *)blk;
     if constexpr (type == GGML_TYPE_TURBO2_0) {
-        cooperative_dequantize_turbo2((const block_turbo2_0 *)blk, dst, lane);
+        cooperative_dequantize_turbo2(raw, dst, lane);
     } else if constexpr (type == GGML_TYPE_TURBO2H_0) {
-        cooperative_dequantize_turbo2h((const block_turbo2h_0 *)blk, dst, lane);
+        cooperative_dequantize_turbo2h(raw, dst, lane);
     } else if constexpr (type == GGML_TYPE_TURBO3_0) {
-        cooperative_dequantize_turbo3((const block_turbo3_0 *)blk, dst, lane);
+        cooperative_dequantize_turbo3(raw, dst, lane);
     } else if constexpr (type == GGML_TYPE_TURBO3H_0) {
-        cooperative_dequantize_turbo3h((const block_turbo3h_0 *)blk, dst, lane);
+        cooperative_dequantize_turbo3h(raw, dst, lane);
     } else if constexpr (type == GGML_TYPE_TURBO4_0) {
-        cooperative_dequantize_turbo4((const block_turbo4_0 *)blk, dst, lane);
+        cooperative_dequantize_turbo4(raw, dst, lane);
     } else if constexpr (type == GGML_TYPE_TURBOP3_0) {
-        cooperative_dequantize_turbop3((const block_turbop3_0 *)blk, dst, lane);
+        cooperative_dequantize_turbop3(raw, dst, lane);
     } else if constexpr (type == GGML_TYPE_TURBOP4_0) {
-        cooperative_dequantize_turbop4((const block_turbop4_0 *)blk, dst, lane);
+        cooperative_dequantize_turbop4(raw, dst, lane);
     } else if constexpr (type == GGML_TYPE_TURBOP5_0) {
-        cooperative_dequantize_turbop5((const block_turbop5_0 *)blk, dst, lane);
+        cooperative_dequantize_turbop5(raw, dst, lane);
     } else {
         static_assert(type == -1, "unsupported turbo type");
     }
