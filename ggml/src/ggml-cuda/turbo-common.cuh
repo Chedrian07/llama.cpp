@@ -202,16 +202,23 @@ static __device__ __host__ __forceinline__ bool is_turbo_type(ggml_type type) {
 
 // One FWHT butterfly stage at compile-time `len`.
 // 64 butterfly pairs per stage, each of 32 lanes handles 2.
+//
+// The buffer lives in __shared__ memory but arrives as a generic float*.
+// CUDA 12.8 targeting sm_120 miscompiles generic-pointer shared-memory
+// indexing (emitting byte-stride instead of float-stride loads).  Using
+// volatile forces scalar load/store at the exact computed address, which
+// the compiler handles correctly.
 template <int len>
 static __device__ __forceinline__ void cooperative_fwht_stage_128(float * buf, const int lane) {
+    volatile float * vbuf = buf;
     #pragma unroll
     for (int p_step = 0; p_step < 2; ++p_step) {
         const int pair = lane + p_step * 32;
         const int base = (pair / len) * (len * 2) + (pair % len);
-        const float u  = buf[base];
-        const float v  = buf[base + len];
-        buf[base]       = u + v;
-        buf[base + len] = u - v;
+        const float u  = vbuf[base];
+        const float v  = vbuf[base + len];
+        vbuf[base]       = u + v;
+        vbuf[base + len] = u - v;
     }
     __syncwarp();
 }
@@ -231,15 +238,16 @@ static __device__ __forceinline__ void cooperative_fwht_128(float * buf, const i
 // Cooperative inverse rotation: FWHT, scale by norm/128, sign flip.
 static __device__ __forceinline__ void cooperative_inverse_rotate(float * buf, const int lane, const float norm) {
     cooperative_fwht_128(buf, lane);
+    volatile float * vbuf = buf;
     const float scale = norm * (1.0f / 128.0f);
     // Each lane handles 4 elements + sign flip
     #pragma unroll
     for (int k = 0; k < 4; ++k) {
         const int i = lane * 4 + k;
         uint32_t h = TURBO_SEED_CUDA * 2654435761u + (uint32_t)i * 2246822519u;
-        float val = buf[i] * scale;
+        float val = vbuf[i] * scale;
         if (h >> 31) { val = -val; }
-        buf[i] = val;
+        vbuf[i] = val;
     }
     __syncwarp();
 }
@@ -275,11 +283,12 @@ static __device__ __forceinline__ float turbo_read_f32(const char * p) {
 
 static __device__ __forceinline__ void cooperative_dequantize_turbo2(
     const char * __restrict__ raw, float * dst, const int lane) {
+    volatile float * vdst = dst;
     const uint8_t byte = (uint8_t)raw[TURBO_OFF_QS + lane];
     #pragma unroll
     for (int k = 0; k < 4; ++k) {
         const int idx = (byte >> (2 * k)) & 0x3;
-        dst[lane * 4 + k] = TURBO2_CENTROIDS[idx];
+        vdst[lane * 4 + k] = TURBO2_CENTROIDS[idx];
     }
     __syncwarp();
     cooperative_inverse_rotate(dst, lane, turbo_read_f32(raw + TURBO_OFF_NORM));
@@ -287,6 +296,7 @@ static __device__ __forceinline__ void cooperative_dequantize_turbo2(
 
 static __device__ __forceinline__ void cooperative_dequantize_turbo2h(
     const char * __restrict__ raw, float * dst, const int lane) {
+    volatile float * vdst = dst;
     if (lane < 8) {
         #pragma unroll
         for (int k = 0; k < 4; ++k) {
@@ -299,7 +309,7 @@ static __device__ __forceinline__ void cooperative_dequantize_turbo2h(
                 val |= ((uint8_t)raw[TURBO2H_OFF_QS_HI + byte_idx + 1] << (8 - bit_idx));
             }
             val &= 0x7;
-            dst[j] = TURBO3_CENTROIDS[val];
+            vdst[j] = TURBO3_CENTROIDS[val];
         }
     } else {
         const int j_base  = lane * 4;
@@ -308,7 +318,7 @@ static __device__ __forceinline__ void cooperative_dequantize_turbo2h(
         #pragma unroll
         for (int k = 0; k < 4; ++k) {
             const int idx = (byte >> (2 * k)) & 0x3;
-            dst[j_base + k] = TURBO2_CENTROIDS[idx];
+            vdst[j_base + k] = TURBO2_CENTROIDS[idx];
         }
     }
     __syncwarp();
@@ -317,6 +327,7 @@ static __device__ __forceinline__ void cooperative_dequantize_turbo2h(
 
 static __device__ __forceinline__ void cooperative_dequantize_turbo3(
     const char * __restrict__ raw, float * dst, const int lane) {
+    volatile float * vdst = dst;
     #pragma unroll
     for (int k = 0; k < 4; ++k) {
         const int j = lane * 4 + k;
@@ -328,7 +339,7 @@ static __device__ __forceinline__ void cooperative_dequantize_turbo3(
             val |= ((uint8_t)raw[TURBO_OFF_QS + byte_idx + 1] << (8 - bit_idx));
         }
         val &= 0x7;
-        dst[j] = TURBO3_CENTROIDS[val];
+        vdst[j] = TURBO3_CENTROIDS[val];
     }
     __syncwarp();
     cooperative_inverse_rotate(dst, lane, turbo_read_f32(raw + TURBO_OFF_NORM));
@@ -336,14 +347,15 @@ static __device__ __forceinline__ void cooperative_dequantize_turbo3(
 
 static __device__ __forceinline__ void cooperative_dequantize_turbo3h(
     const char * __restrict__ raw, float * dst, const int lane) {
+    volatile float * vdst = dst;
     if (lane < 16) {
         const int j_base = lane * 4;
         const uint8_t b0 = (uint8_t)raw[TURBO3H_OFF_QS_HI + j_base / 2];
         const uint8_t b1 = (uint8_t)raw[TURBO3H_OFF_QS_HI + j_base / 2 + 1];
-        dst[j_base + 0] = TURBO4_CENTROIDS[b0 & 0xF];
-        dst[j_base + 1] = TURBO4_CENTROIDS[(b0 >> 4) & 0xF];
-        dst[j_base + 2] = TURBO4_CENTROIDS[b1 & 0xF];
-        dst[j_base + 3] = TURBO4_CENTROIDS[(b1 >> 4) & 0xF];
+        vdst[j_base + 0] = TURBO4_CENTROIDS[b0 & 0xF];
+        vdst[j_base + 1] = TURBO4_CENTROIDS[(b0 >> 4) & 0xF];
+        vdst[j_base + 2] = TURBO4_CENTROIDS[b1 & 0xF];
+        vdst[j_base + 3] = TURBO4_CENTROIDS[(b1 >> 4) & 0xF];
     } else {
         const int j_global_base = lane * 4;
         #pragma unroll
@@ -358,7 +370,7 @@ static __device__ __forceinline__ void cooperative_dequantize_turbo3h(
                 val |= ((uint8_t)raw[TURBO3H_OFF_QS_LO + byte_idx + 1] << (8 - bit_idx));
             }
             val &= 0x7;
-            dst[jg] = TURBO3_CENTROIDS[val];
+            vdst[jg] = TURBO3_CENTROIDS[val];
         }
     }
     __syncwarp();
@@ -367,12 +379,13 @@ static __device__ __forceinline__ void cooperative_dequantize_turbo3h(
 
 static __device__ __forceinline__ void cooperative_dequantize_turbo4(
     const char * __restrict__ raw, float * dst, const int lane) {
+    volatile float * vdst = dst;
     const uint8_t b0 = (uint8_t)raw[TURBO_OFF_QS + lane * 2];
     const uint8_t b1 = (uint8_t)raw[TURBO_OFF_QS + lane * 2 + 1];
-    dst[lane * 4 + 0] = TURBO4_CENTROIDS[b0 & 0xF];
-    dst[lane * 4 + 1] = TURBO4_CENTROIDS[(b0 >> 4) & 0xF];
-    dst[lane * 4 + 2] = TURBO4_CENTROIDS[b1 & 0xF];
-    dst[lane * 4 + 3] = TURBO4_CENTROIDS[(b1 >> 4) & 0xF];
+    vdst[lane * 4 + 0] = TURBO4_CENTROIDS[b0 & 0xF];
+    vdst[lane * 4 + 1] = TURBO4_CENTROIDS[(b0 >> 4) & 0xF];
+    vdst[lane * 4 + 2] = TURBO4_CENTROIDS[b1 & 0xF];
+    vdst[lane * 4 + 3] = TURBO4_CENTROIDS[(b1 >> 4) & 0xF];
     __syncwarp();
     cooperative_inverse_rotate(dst, lane, turbo_read_f32(raw + TURBO_OFF_NORM));
 }
@@ -383,11 +396,12 @@ static __device__ __forceinline__ void cooperative_dequantize_turbo4(
 
 static __device__ __forceinline__ void cooperative_dequantize_turbop3(
     const char * __restrict__ raw, float * dst, const int lane) {
+    volatile float * vdst = dst;
     const uint8_t byte = (uint8_t)raw[TURBOP_OFF_QS + lane];
     #pragma unroll
     for (int k = 0; k < 4; ++k) {
         const int idx = (byte >> (2 * k)) & 0x3;
-        dst[lane * 4 + k] = TURBO2_CENTROIDS[idx];
+        vdst[lane * 4 + k] = TURBO2_CENTROIDS[idx];
     }
     __syncwarp();
     cooperative_inverse_rotate(dst, lane, turbo_read_f32(raw + TURBOP_OFF_NORM));
@@ -395,6 +409,7 @@ static __device__ __forceinline__ void cooperative_dequantize_turbop3(
 
 static __device__ __forceinline__ void cooperative_dequantize_turbop4(
     const char * __restrict__ raw, float * dst, const int lane) {
+    volatile float * vdst = dst;
     #pragma unroll
     for (int k = 0; k < 4; ++k) {
         const int j = lane * 4 + k;
@@ -406,7 +421,7 @@ static __device__ __forceinline__ void cooperative_dequantize_turbop4(
             val |= ((uint8_t)raw[TURBOP_OFF_QS + byte_idx + 1] << (8 - bit_idx));
         }
         val &= 0x7;
-        dst[j] = TURBO3_CENTROIDS[val];
+        vdst[j] = TURBO3_CENTROIDS[val];
     }
     __syncwarp();
     cooperative_inverse_rotate(dst, lane, turbo_read_f32(raw + TURBOP_OFF_NORM));
@@ -414,12 +429,13 @@ static __device__ __forceinline__ void cooperative_dequantize_turbop4(
 
 static __device__ __forceinline__ void cooperative_dequantize_turbop5(
     const char * __restrict__ raw, float * dst, const int lane) {
+    volatile float * vdst = dst;
     const uint8_t b0 = (uint8_t)raw[TURBOP_OFF_QS + lane * 2];
     const uint8_t b1 = (uint8_t)raw[TURBOP_OFF_QS + lane * 2 + 1];
-    dst[lane * 4 + 0] = TURBO4_CENTROIDS[b0 & 0xF];
-    dst[lane * 4 + 1] = TURBO4_CENTROIDS[(b0 >> 4) & 0xF];
-    dst[lane * 4 + 2] = TURBO4_CENTROIDS[b1 & 0xF];
-    dst[lane * 4 + 3] = TURBO4_CENTROIDS[(b1 >> 4) & 0xF];
+    vdst[lane * 4 + 0] = TURBO4_CENTROIDS[b0 & 0xF];
+    vdst[lane * 4 + 1] = TURBO4_CENTROIDS[(b0 >> 4) & 0xF];
+    vdst[lane * 4 + 2] = TURBO4_CENTROIDS[b1 & 0xF];
+    vdst[lane * 4 + 3] = TURBO4_CENTROIDS[(b1 >> 4) & 0xF];
     __syncwarp();
     cooperative_inverse_rotate(dst, lane, turbo_read_f32(raw + TURBOP_OFF_NORM));
 }
@@ -456,14 +472,15 @@ static __device__ __forceinline__ float turbo_qjl_proj_sign(const int i) {
 // out to allow the compiler to fold the constant scale.
 static __device__ __forceinline__ void cooperative_inverse_rotate_unit(float * buf, const int lane) {
     cooperative_fwht_128(buf, lane);
+    volatile float * vbuf = buf;
     constexpr float scale = 1.0f / 128.0f;
     #pragma unroll
     for (int k = 0; k < 4; ++k) {
         const int i = lane * 4 + k;
         const uint32_t h = TURBO_SEED_CUDA * 2654435761u + (uint32_t)i * 2246822519u;
-        float val = buf[i] * scale;
+        float val = vbuf[i] * scale;
         if (h >> 31) { val = -val; }
-        buf[i] = val;
+        vbuf[i] = val;
     }
     __syncwarp();
 }
@@ -477,13 +494,14 @@ static __device__ __forceinline__ void cooperative_inverse_rotate_unit(float * b
 // when adding to the dot product.
 static __device__ __forceinline__ void cooperative_qjl_signs_to_orig(
     const uint8_t * __restrict__ qjl, float * dst, const int lane) {
+    volatile float * vdst = dst;
     #pragma unroll
     for (int k = 0; k < 4; ++k) {
         const int i  = lane * 4 + k;
         const int bit = (qjl[i / 8] >> (i % 8)) & 1;
         const float ps = turbo_qjl_proj_sign(i);
         // sign_vec[i] = proj_sign_i * (2*bit - 1)
-        dst[i] = ps * (bit ? 1.0f : -1.0f);
+        vdst[i] = ps * (bit ? 1.0f : -1.0f);
     }
     __syncwarp();
     cooperative_inverse_rotate_unit(dst, lane);
