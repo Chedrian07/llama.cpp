@@ -1,0 +1,22 @@
+{
+  "wall_seconds": 12.945324916,
+  "server": "http://169.254.150.225:18081",
+  "prompt": "results/mcd/prompts/prompt_2048.txt",
+  "response": {
+    "content": "Section 22\nThe benchmark text is deterministic and intentionally repetitive. It contains",
+    "timings": {
+      "cache_n": 0,
+      "prompt_n": 2557,
+      "prompt_ms": 12275.273,
+      "prompt_per_token_ms": 4.800654282362143,
+      "prompt_per_second": 208.30493953169108,
+      "predicted_n": 16,
+      "predicted_ms": 656.276,
+      "predicted_per_token_ms": 41.01725,
+      "predicted_per_second": 24.37998646910751
+    },
+    "tokens_predicted": 16,
+    "tokens_evaluated": 2557,
+    "generation_settings/n_predict": 16
+  }
+}

@@ -1,0 +1,10 @@
+{"event": "listening", "bind": "169.254.150.225", "port": 5202}
+{
+  "peer": "169.254.21.157",
+  "path": "results/mcd/mac_slots/mcd_slot_32768.bin",
+  "bytes": 4201609948,
+  "seconds": 3.5903940839999997,
+  "gbps": 9.361891424061293,
+  "sha256": "cad13b92ff5a85be34407ff21cc91af746f7d5671338c924d4acd3665d2b6dcd",
+  "sha256_match": true
+}

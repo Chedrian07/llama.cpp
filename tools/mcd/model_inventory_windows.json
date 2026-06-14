@@ -1,0 +1,278 @@
+{
+  "roots": [
+    "C:\\Users\\-_-kc\\models"
+  ],
+  "count": 30,
+  "models": [
+    {
+      "path": "C:\\Users\\-_-kc\\models\\LiquidAI\\LFM2.5-8B-A1B-GGUF\\LFM2.5-8B-A1B-Q8_0.gguf",
+      "basename": "LFM2.5-8B-A1B-Q8_0.gguf",
+      "size": 9010195680,
+      "size_gb": 8.391,
+      "mtime": 1780405817,
+      "quant": "Q8_0_gguf",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\Qwen3.5-0.8B-GGUF\\Qwen3.5-0.8B-UD-Q6_K_XL.gguf",
+      "basename": "Qwen3.5-0.8B-UD-Q6_K_XL.gguf",
+      "size": 771092736,
+      "size_gb": 0.718,
+      "mtime": 1773579294,
+      "quant": "UD_Q6_K_XL",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\Qwen3.5-2B-GGUF\\Qwen3.5-2B-Q6_K.gguf",
+      "basename": "Qwen3.5-2B-Q6_K.gguf",
+      "size": 1574961408,
+      "size_gb": 1.467,
+      "mtime": 1773579593,
+      "quant": "Q6_K_gguf",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\Qwen3.5-4B-GGUF\\Qwen3.5-4B-Q4_K_M.gguf",
+      "basename": "Qwen3.5-4B-Q4_K_M.gguf",
+      "size": 2740937888,
+      "size_gb": 2.553,
+      "mtime": 1780366950,
+      "quant": "Q4_K_M_gguf",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\Qwen3.5-4B-MTP-GGUF\\Qwen3.5-4B-Q4_K_M.gguf",
+      "basename": "Qwen3.5-4B-Q4_K_M.gguf",
+      "size": 2834975040,
+      "size_gb": 2.64,
+      "mtime": 1780367405,
+      "quant": "Q4_K_M_gguf",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\Qwen3.5-4B-MTP-GGUF\\Qwen3.5-4B-UD-Q6_K_XL.gguf",
+      "basename": "Qwen3.5-4B-UD-Q6_K_XL.gguf",
+      "size": 4261908800,
+      "size_gb": 3.969,
+      "mtime": 1780367466,
+      "quant": "UD_Q6_K_XL",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\Qwen3.5-4B-GGUF\\Qwen3.5-4B-UD-Q8_K_XL.gguf",
+      "basename": "Qwen3.5-4B-UD-Q8_K_XL.gguf",
+      "size": 5952048288,
+      "size_gb": 5.543,
+      "mtime": 1780367770,
+      "quant": "UD_Q8_K_XL",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\Jackrong\\Qwen3.5-9B-DeepSeek-V4-Flash-GGUF\\Qwen3.5-9B-DeepSeek-V4-Flash-Q4_K_M.gguf",
+      "basename": "Qwen3.5-9B-DeepSeek-V4-Flash-Q4_K_M.gguf",
+      "size": 5629105408,
+      "size_gb": 5.243,
+      "mtime": 1778476202,
+      "quant": "Q4_K_M_gguf",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\Qwen3.6-27B-MTP-GGUF\\Qwen3.6-27B-IQ4_XS.gguf",
+      "basename": "Qwen3.6-27B-IQ4_XS.gguf",
+      "size": 15705859200,
+      "size_gb": 14.627,
+      "mtime": 1779266069,
+      "quant": "IQ4_XS_gguf",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\Qwen3.6-35B-A3B-GGUF\\Qwen3.6-35B-A3B-UD-IQ4_XS.gguf",
+      "basename": "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf",
+      "size": 17730509504,
+      "size_gb": 16.513,
+      "mtime": 1776349482,
+      "quant": "UD_IQ4_XS_gguf",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\gemma-4-12b-it-GGUF\\gemma-4-12b-it-UD-Q4_K_XL.gguf",
+      "basename": "gemma-4-12b-it-UD-Q4_K_XL.gguf",
+      "size": 7366421920,
+      "size_gb": 6.861,
+      "mtime": 1780538006,
+      "quant": "UD_Q4_K_XL",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\gemma-4-26B-A4B-it-qat-GGUF\\gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
+      "basename": "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
+      "size": 14249045120,
+      "size_gb": 13.27,
+      "mtime": 1780736348,
+      "quant": "UD_Q4_K_XL",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\Radamanthys11\\Gemma-4-31B-it-assistant-GGUF\\gemma-4-31B-it-assistant-Q8_0.gguf",
+      "basename": "gemma-4-31B-it-assistant-Q8_0.gguf",
+      "size": 514702496,
+      "size_gb": 0.479,
+      "mtime": 1781186292,
+      "quant": "Q8_0_gguf",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\gemma-4-31B-it-qat-GGUF\\gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+      "basename": "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+      "size": 17287668064,
+      "size_gb": 16.1,
+      "mtime": 1780736410,
+      "quant": "UD_Q4_K_XL",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\gemma-4-E2B-it-GGUF\\gemma-4-E2B-it-UD-Q4_K_XL.gguf",
+      "basename": "gemma-4-E2B-it-UD-Q4_K_XL.gguf",
+      "size": 3174038912,
+      "size_gb": 2.956,
+      "mtime": 1775525349,
+      "quant": "UD_Q4_K_XL",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\gemma-4-E4B-it-GGUF\\gemma-4-E4B-it-UD-Q4_K_XL.gguf",
+      "basename": "gemma-4-E4B-it-UD-Q4_K_XL.gguf",
+      "size": 5101713536,
+      "size_gb": 4.751,
+      "mtime": 1775194889,
+      "quant": "UD_Q4_K_XL",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\lmstudio-community\\gpt-oss-20b-GGUF\\gpt-oss-20b-MXFP4.gguf",
+      "basename": "gpt-oss-20b-MXFP4.gguf",
+      "size": 12109565632,
+      "size_gb": 11.278,
+      "mtime": 1773581153,
+      "quant": "MXFP4",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\gemma-4-12b-it-GGUF\\mmproj-F32.gguf",
+      "basename": "mmproj-F32.gguf",
+      "size": 209522240,
+      "size_gb": 0.195,
+      "mtime": 1780537798,
+      "quant": "F32",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\Qwen3.5-0.8B-GGUF\\mmproj-F32.gguf",
+      "basename": "mmproj-F32.gguf",
+      "size": 402381664,
+      "size_gb": 0.375,
+      "mtime": 1773579228,
+      "quant": "F32",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\Qwen3.5-2B-GGUF\\mmproj-F32.gguf",
+      "basename": "mmproj-F32.gguf",
+      "size": 1325684416,
+      "size_gb": 1.235,
+      "mtime": 1773579421,
+      "quant": "F32",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\Qwen3.5-4B-MTP-GGUF\\mmproj-F32.gguf",
+      "basename": "mmproj-F32.gguf",
+      "size": 1334074944,
+      "size_gb": 1.242,
+      "mtime": 1780367361,
+      "quant": "F32",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\Qwen3.5-4B-GGUF\\mmproj-F32.gguf",
+      "basename": "mmproj-F32.gguf",
+      "size": 1334075072,
+      "size_gb": 1.242,
+      "mtime": 1780366910,
+      "quant": "F32",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\Qwen3.6-35B-A3B-GGUF\\mmproj-F32.gguf",
+      "basename": "mmproj-F32.gguf",
+      "size": 1786304960,
+      "size_gb": 1.664,
+      "mtime": 1776349028,
+      "quant": "F32",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\Qwen3.6-27B-MTP-GGUF\\mmproj-F32.gguf",
+      "basename": "mmproj-F32.gguf",
+      "size": 1842940480,
+      "size_gb": 1.716,
+      "mtime": 1778719033,
+      "quant": "F32",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\gemma-4-E2B-it-GGUF\\mmproj-F32.gguf",
+      "basename": "mmproj-F32.gguf",
+      "size": 1903027136,
+      "size_gb": 1.772,
+      "mtime": 1775525324,
+      "quant": "F32",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\gemma-4-E4B-it-GGUF\\mmproj-F32.gguf",
+      "basename": "mmproj-F32.gguf",
+      "size": 1912464064,
+      "size_gb": 1.781,
+      "mtime": 1775194823,
+      "quant": "F32",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\gemma-4-26B-A4B-it-qat-GGUF\\mmproj-F32.gguf",
+      "basename": "mmproj-F32.gguf",
+      "size": 2291200480,
+      "size_gb": 2.134,
+      "mtime": 1780735805,
+      "quant": "F32",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\unsloth\\gemma-4-31B-it-qat-GGUF\\mmproj-F32.gguf",
+      "basename": "mmproj-F32.gguf",
+      "size": 2302996960,
+      "size_gb": 2.145,
+      "mtime": 1780735839,
+      "quant": "F32",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\bartowski\\nex-agi_Nex-N2-mini-GGUF\\mmproj-nex-agi_Nex-N2-mini-f16.gguf",
+      "basename": "mmproj-nex-agi_Nex-N2-mini-f16.gguf",
+      "size": 899283008,
+      "size_gb": 0.838,
+      "mtime": 1781365455,
+      "quant": "",
+      "sha256": null
+    },
+    {
+      "path": "C:\\Users\\-_-kc\\models\\bartowski\\nex-agi_Nex-N2-mini-GGUF\\nex-agi_Nex-N2-mini-IQ4_XS.gguf",
+      "basename": "nex-agi_Nex-N2-mini-IQ4_XS.gguf",
+      "size": 18806446080,
+      "size_gb": 17.515,
+      "mtime": 1781365835,
+      "quant": "IQ4_XS_gguf",
+      "sha256": null
+    }
+  ]
+}

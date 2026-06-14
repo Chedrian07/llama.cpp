@@ -1,0 +1,16 @@
+{
+  "wall_seconds": 0.084606791,
+  "server": "http://169.254.150.225:18081",
+  "id_slot": 0,
+  "action": "restore",
+  "filename": "handoff_2048.bin",
+  "response": {
+    "id_slot": 0,
+    "filename": "handoff_2048.bin",
+    "n_restored": 2557,
+    "n_read": 1048384924,
+    "timings": {
+      "restore_ms": 79.421
+    }
+  }
+}

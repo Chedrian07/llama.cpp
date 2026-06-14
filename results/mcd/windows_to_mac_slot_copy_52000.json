@@ -1,0 +1,10 @@
+﻿{
+  "file": "results\\mcd\\windows_slots\\mcd_slot_52000.bin",
+  "host": "169.254.150.225",
+  "port": 5202,
+  "source": "169.254.21.157",
+  "bytes": 6190852156,
+  "seconds": 5.250977399991825,
+  "gbps": 9.431923521148102,
+  "sha256": "1e58b71c907bbefbe56db1c3acd148be6ad38c9555c3cd11b3f2cb6e508976e0"
+}

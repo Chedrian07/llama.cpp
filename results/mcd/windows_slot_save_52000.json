@@ -1,0 +1,16 @@
+﻿{
+  "wall_seconds": 7.563132000155747,
+  "server": "http://169.254.21.157:18080",
+  "id_slot": 0,
+  "action": "save",
+  "filename": "mcd_slot_52000.bin",
+  "response": {
+    "id_slot": 0,
+    "filename": "mcd_slot_52000.bin",
+    "n_saved": 65319,
+    "n_written": 6190852156,
+    "timings": {
+      "save_ms": 7538.876
+    }
+  }
+}

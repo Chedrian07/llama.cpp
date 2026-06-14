@@ -1,0 +1,16 @@
+{
+  "wall_seconds": 0.330512625,
+  "server": "http://169.254.150.225:18081",
+  "id_slot": 0,
+  "action": "restore",
+  "filename": "mcd_slot_32768.bin",
+  "response": {
+    "id_slot": 0,
+    "filename": "mcd_slot_32768.bin",
+    "n_restored": 41041,
+    "n_read": 4201609948,
+    "timings": {
+      "restore_ms": 325.083
+    }
+  }
+}

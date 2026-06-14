@@ -1,0 +1,10 @@
+{"event": "listening", "bind": "169.254.150.225", "port": 5202}
+{
+  "peer": "169.254.21.157",
+  "path": "results/mcd/mac_slots/handoff_512.bin",
+  "bytes": 617287864,
+  "seconds": 0.5494244999999998,
+  "gbps": 8.988137427435438,
+  "sha256": "10708d2fb84e3eb405cd7037d0d592126dd0e0083ac7260a979397da3c857748",
+  "sha256_match": true
+}

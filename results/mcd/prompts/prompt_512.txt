@@ -1,0 +1,96 @@
+Section 0
+The benchmark text is deterministic and intentionally repetitive. It contains
+code, data, and prose so the tokenizer sees a realistic long prompt.
+
+```cpp
+int mcd_value_0 = 0;
+for (int j = 0; j < 8; ++j) {
+    mcd_value_0 += j;
+}
+```
+
+Facts:
+- Windows CUDA performs prompt prefill.
+- Mac Metal performs local decode.
+- Direct 10GbE carries only binary state payloads.
+
+Section 1
+The benchmark text is deterministic and intentionally repetitive. It contains
+code, data, and prose so the tokenizer sees a realistic long prompt.
+
+```cpp
+int mcd_value_1 = 1;
+for (int j = 0; j < 8; ++j) {
+    mcd_value_1 += j;
+}
+```
+
+Facts:
+- Windows CUDA performs prompt prefill.
+- Mac Metal performs local decode.
+- Direct 10GbE carries only binary state payloads.
+
+Section 2
+The benchmark text is deterministic and intentionally repetitive. It contains
+code, data, and prose so the tokenizer sees a realistic long prompt.
+
+```cpp
+int mcd_value_2 = 2;
+for (int j = 0; j < 8; ++j) {
+    mcd_value_2 += j;
+}
+```
+
+Facts:
+- Windows CUDA performs prompt prefill.
+- Mac Metal performs local decode.
+- Direct 10GbE carries only binary state payloads.
+
+Section 3
+The benchmark text is deterministic and intentionally repetitive. It contains
+code, data, and prose so the tokenizer sees a realistic long prompt.
+
+```cpp
+int mcd_value_3 = 3;
+for (int j = 0; j < 8; ++j) {
+    mcd_value_3 += j;
+}
+```
+
+Facts:
+- Windows CUDA performs prompt prefill.
+- Mac Metal performs local decode.
+- Direct 10GbE carries only binary state payloads.
+
+Section 4
+The benchmark text is deterministic and intentionally repetitive. It contains
+code, data, and prose so the tokenizer sees a realistic long prompt.
+
+```cpp
+int mcd_value_4 = 4;
+for (int j = 0; j < 8; ++j) {
+    mcd_value_4 += j;
+}
+```
+
+Facts:
+- Windows CUDA performs prompt prefill.
+- Mac Metal performs local decode.
+- Direct 10GbE carries only binary state payloads.
+
+Section 5
+The benchmark text is deterministic and intentionally repetitive. It contains
+code, data, and prose so the tokenizer sees a realistic long prompt.
+
+```cpp
+int mcd_value_5 = 5;
+for (int j = 0; j < 8; ++j) {
+    mcd_value_5 += j;
+}
+```
+
+Facts:
+- Windows CUDA performs prompt prefill.
+- Mac Metal performs local decode.
+- Direct 10GbE carries only binary state payloads.
+

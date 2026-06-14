@@ -1,0 +1,90 @@
+{
+  "roots": [
+    "/Users/kch3dri4n/.lmstudio/models",
+    "/Volumes/Back_UP_LLM/models"
+  ],
+  "count": 9,
+  "models": [
+    {
+      "path": "/Volumes/Back_UP_LLM/models/unsloth/Qwen3-Coder-Next-GGUF/Qwen3-Coder-Next-UD-Q6_K_XL-00001-of-00003.gguf",
+      "basename": "Qwen3-Coder-Next-UD-Q6_K_XL-00001-of-00003.gguf",
+      "size": 5936288,
+      "size_gb": 0.006,
+      "mtime": 1779957324,
+      "quant": "UD_Q6_K_XL",
+      "sha256": null
+    },
+    {
+      "path": "/Volumes/Back_UP_LLM/models/unsloth/Qwen3-Coder-Next-GGUF/Qwen3-Coder-Next-UD-Q6_K_XL-00002-of-00003.gguf",
+      "basename": "Qwen3-Coder-Next-UD-Q6_K_XL-00002-of-00003.gguf",
+      "size": 49957125920,
+      "size_gb": 46.526,
+      "mtime": 1779959007,
+      "quant": "UD_Q6_K_XL",
+      "sha256": null
+    },
+    {
+      "path": "/Volumes/Back_UP_LLM/models/unsloth/Qwen3-Coder-Next-GGUF/Qwen3-Coder-Next-UD-Q6_K_XL-00003-of-00003.gguf",
+      "basename": "Qwen3-Coder-Next-UD-Q6_K_XL-00003-of-00003.gguf",
+      "size": 23155707296,
+      "size_gb": 21.565,
+      "mtime": 1779958154,
+      "quant": "UD_Q6_K_XL",
+      "sha256": null
+    },
+    {
+      "path": "/Volumes/Back_UP_LLM/models/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf",
+      "basename": "Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf",
+      "size": 38451182560,
+      "size_gb": 35.81,
+      "mtime": 1779714716,
+      "quant": "UD_Q8_K_XL",
+      "sha256": null
+    },
+    {
+      "path": "/Volumes/Back_UP_LLM/models/unsloth/diffusiongemma-26B-A4B-it-GGUF/diffusiongemma-26B-A4B-it-Q8_0.gguf",
+      "basename": "diffusiongemma-26B-A4B-it-Q8_0.gguf",
+      "size": 26878831328,
+      "size_gb": 25.033,
+      "mtime": 1781364534,
+      "quant": "Q8_0_gguf",
+      "sha256": null
+    },
+    {
+      "path": "/Volumes/Back_UP_LLM/models/unsloth/gemma-4-31B-it-qat-GGUF/gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+      "basename": "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+      "size": 17287668064,
+      "size_gb": 16.1,
+      "mtime": 1780729639,
+      "quant": "UD_Q4_K_XL",
+      "sha256": null
+    },
+    {
+      "path": "/Volumes/Back_UP_LLM/models/unsloth/Qwen3.6-35B-A3B-GGUF/mmproj-F32.gguf",
+      "basename": "mmproj-F32.gguf",
+      "size": 1786305248,
+      "size_gb": 1.664,
+      "mtime": 1779713325,
+      "quant": "F32",
+      "sha256": null
+    },
+    {
+      "path": "/Volumes/Back_UP_LLM/models/unsloth/gemma-4-31B-it-qat-GGUF/mmproj-F32.gguf",
+      "basename": "mmproj-F32.gguf",
+      "size": 2302996960,
+      "size_gb": 2.145,
+      "mtime": 1780729134,
+      "quant": "F32",
+      "sha256": null
+    },
+    {
+      "path": "/Volumes/Back_UP_LLM/models/DeepSeek-V4-Flash-FP4-FP8-SSD/dense/model-dense.gguf",
+      "basename": "model-dense.gguf",
+      "size": 8978441472,
+      "size_gb": 8.362,
+      "mtime": 1779760258,
+      "quant": "",
+      "sha256": null
+    }
+  ]
+}
